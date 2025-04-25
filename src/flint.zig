@@ -143,7 +143,12 @@ pub fn watcherThread(
         zlog.info("Starting kqueue watcher thread", .{});
         var events: [16]std.posix.Kevent = undefined;
         while (!utils.shouldExit()) {
-            const n = std.posix.kevent(watcher.kq, null, 0, &events, events.len, null) catch |err| {
+            const n = std.posix.kevent(
+                watcher.kq,
+                &[_]std.posix.Kevent{},
+                events[0..],
+                null,
+            ) catch |err| {
                 zlog.err("kqueue error: {s}", .{@errorName(err)});
                 break;
             };
