@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const zlog = @import("zlog");
 const flint = @import("flint.zig");
 const utils = @import("utils.zig");
@@ -62,7 +63,7 @@ pub fn main() !void {
             try runCommand(allocator, t.cmd);
         } else {
             try runCommand(allocator, t.cmd);
-            const debounce_ns = 200_000_000; // 200ms
+            const debounce_ns = 100_000; // 200ms
             var last_run_time: i128 = 0;
 
             while (true) {
@@ -89,38 +90,60 @@ pub fn main() !void {
 }
 
 fn runCommand(allocator: std.mem.Allocator, cmd: []const u8) !void {
-    // const shell = "/bin/sh";
-    // const shell_args = "-c";
+    if (builtin.os.tag == .macos) {
+        // 1. Create a temp file path (don't open it yet)
+        var tmp_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const tmp_path = try std.fmt.bufPrint(&tmp_path_buf, "/tmp/flint-script-XXXXXX", .{});
 
-    // const merge_cmd = try std.fmt.allocPrint(allocator, "{s} 2>&1", .{cmd});
-    // defer allocator.free(merge_cmd);
+        // 2. Build the args: script -q <tmpfile> /bin/sh -c <cmd>
+        var args = [_][]const u8{ "script", "-q", tmp_path, "/bin/sh", "-c", cmd };
+        var child = std.process.Child.init(&args, allocator);
+        child.stdout_behavior = .Ignore;
+        child.stderr_behavior = .Ignore;
 
-    // const args = [_][]const u8{ shell, shell_args, merge_cmd };
+        try child.spawn();
+        _ = try child.wait();
 
-    const args = [_][]const u8{ "script", "-q", "-c", cmd, "/dev/null" };
-    var child = std.process.Child.init(&args, allocator);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe;
+        // 3. Open and print the temp file
+        var tmp_file = try std.fs.cwd().openFile(tmp_path, .{});
+        defer tmp_file.close();
 
-    try child.spawn();
-
-    if (child.stdout) |stdout| {
-        var buf: [1024]u8 = undefined;
+        var buf: [4096]u8 = undefined;
         while (true) {
-            const n = try stdout.read(&buf);
+            const n = try tmp_file.read(&buf);
             if (n == 0) break;
             _ = try std.io.getStdOut().writeAll(buf[0..n]);
         }
-    }
 
-    if (child.stderr) |stderr| {
-        var buf: [1024]u8 = undefined;
-        while (true) {
-            const n = try stderr.read(&buf);
-            if (n == 0) break;
-            _ = try std.io.getStdErr().writeAll(buf[0..n]);
+        // 4. Delete the temp file
+        std.fs.cwd().deleteFile(tmp_path) catch {};
+    } else {
+        // Linux and others: use script -q -c <cmd> /dev/null
+        var args = [_][]const u8{ "script", "-q", "-c", cmd, "/dev/null" };
+        var child = std.process.Child.init(&args, allocator);
+        child.stdout_behavior = .Pipe;
+        child.stderr_behavior = .Pipe;
+
+        try child.spawn();
+
+        if (child.stdout) |stdout| {
+            var buf: [1024]u8 = undefined;
+            while (true) {
+                const n = try stdout.read(&buf);
+                if (n == 0) break;
+                _ = try std.io.getStdOut().writeAll(buf[0..n]);
+            }
         }
-    }
 
-    _ = try child.wait();
+        if (child.stderr) |stderr| {
+            var buf: [1024]u8 = undefined;
+            while (true) {
+                const n = try stderr.read(&buf);
+                if (n == 0) break;
+                _ = try std.io.getStdErr().writeAll(buf[0..n]);
+            }
+        }
+
+        _ = try child.wait();
+    }
 }
