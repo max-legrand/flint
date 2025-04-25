@@ -266,7 +266,7 @@ const MacOSWatcher = struct {
                 try watcher.files.put(file, stat.mtime);
                 try watcher.fds.put(file, f.handle);
 
-                var kev = std.posix.Kevent{
+                const kev = std.posix.Kevent{
                     .ident = @intCast(f.handle),
                     .filter = std.posix.system.EVFILT.VNODE,
                     .flags = std.posix.system.EV.ENABLE | std.posix.system.EV.ADD | std.posix.system.EV.CLEAR,
@@ -275,7 +275,12 @@ const MacOSWatcher = struct {
                     .udata = 0,
                 };
 
-                _ = try std.posix.kevent(watcher.kq, &kev, 1, null, 0, null);
+                _ = try std.posix.kevent(
+                    watcher.kq,
+                    &[_]std.posix.Kevent{kev},
+                    &[_]std.posix.Kevent{},
+                    null,
+                );
                 // Don't close f, keep it open for kqueue
             }
             return watcher;
