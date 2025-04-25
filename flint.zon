@@ -1,0 +1,11 @@
+.{
+    .tasks = .{
+        .{ .name = "build", .cmd = "zig build --summary all" },
+        .{ .name = "test", .cmd = "zig build test" },
+        .{ .name = "echo", .cmd = "echo $(gh auth status)" },
+    },
+    .watcher = .{
+        "src/*",
+    },
+}
+
