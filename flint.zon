@@ -1,0 +1,11 @@
+.{
+    .tasks = .{
+        .{
+            .name = "build",
+            .cmd = "zig build --release=safe --summary all",
+        },
+    },
+    .watcher = .{
+        "src/*",
+    },
+}

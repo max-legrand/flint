@@ -63,156 +63,44 @@ pub fn watcherThread(
     watcher: *Watcher,
     file_changed: *std.atomic.Value(bool),
 ) void {
-    if (builtin.os.tag == .linux) {
-        zlog.info("Starting watcher thread", .{});
-        var buf: [4096]u8 = undefined;
-        const mask = std.os.linux.IN.MODIFY | std.os.linux.IN.CLOSE_WRITE | std.os.linux.IN.MOVE_SELF | std.os.linux.IN.DELETE_SELF | std.os.linux.IN.ATTRIB;
-        var pending_readd: ?[]const u8 = null;
+    zlog.info("Starting polling watcher thread", .{});
 
-        while (!utils.shouldExit()) {
-            const n = std.os.linux.read(watcher.fd, &buf, buf.len);
-            if (n == -1) {
-                if (std.os.errno(-1) == std.os.EAGAIN) {
-                    std.time.sleep(100 * std.time.ns_per_ms);
-                    continue;
-                } else {
-                    break;
-                }
-            }
-            var i: usize = 0;
-            const max_event_size = @sizeOf(std.os.linux.inotify_event) + 4096;
-            while (i + @sizeOf(std.os.linux.inotify_event) <= n) {
-                const event_ptr = &buf[i];
-                const event: *const std.os.linux.inotify_event = @ptrCast(@alignCast(event_ptr));
-                const event_size = @sizeOf(std.os.linux.inotify_event) + event.len;
-                if (event_size > max_event_size) break;
-                if (i + event_size > n) break;
+    const idle_sleep = 200 * std.time.ns_per_ms;
+    const active_sleep = 50 * std.time.ns_per_ms;
+    var last_change_time: i128 = std.time.milliTimestamp();
 
-                var file_name: ?[]const u8 = null;
-                var it = watcher.wd_map.iterator();
-                while (it.next()) |entry| {
-                    if (entry.value_ptr.* == event.wd) {
-                        file_name = entry.key_ptr.*;
-                        break;
-                    }
-                }
+    while (!utils.shouldExit()) {
+        const now = std.time.milliTimestamp();
+        const delta = now - last_change_time;
 
-                if ((event.mask & std.os.linux.IN.CLOSE_WRITE) != 0) {
-                    if (!file_changed.load(.seq_cst)) {
-                        file_changed.store(true, .seq_cst);
-                    }
-                } else if ((event.mask & (std.os.linux.IN.DELETE_SELF | std.os.linux.IN.MOVE_SELF)) != 0) {
-                    if (file_name) |fname| {
-                        pending_readd = fname;
-                    }
-                }
+        var keys = watcher.files.keyIterator();
+        var any_dirty = false;
 
-                i += event_size;
-            }
+        while (keys.next()) |key| {
+            const file = std.fs.cwd().openFile(key.*, .{}) catch continue;
+            defer file.close();
+            const stat = file.stat() catch continue;
 
-            // Handle pending re-add after processing all events
-            if (pending_readd) |fname| {
-                std.Thread.sleep(500 * std.time.ns_per_ms);
-                if (!file_changed.load(.seq_cst)) {
-                    file_changed.store(true, .seq_cst);
-                }
-                var exists = true;
-                std.fs.cwd().access(fname, .{}) catch {
-                    exists = false;
-                };
-
-                if (exists) {
-                    _ = watcher.wd_map.remove(fname);
-                    const wd_raw = std.os.linux.inotify_add_watch(
-                        watcher.fd,
-                        std.heap.page_allocator.dupeZ(u8, fname) catch @panic("Unable to allocate memory"),
-                        mask,
-                    );
-                    const wd_lg: i64 = @bitCast(wd_raw);
-                    const wd: i32 = @intCast(wd_lg);
-                    if (wd >= 0) {
-                        watcher.wd_map.put(fname, wd) catch {};
-                        pending_readd = null;
-                    } else {
-                        zlog.err("Failed to re-add inotify watch for {s}, will retry", .{fname});
-                    }
-                }
+            const old = watcher.files.get(key.*).?;
+            if (stat.mtime > old) {
+                watcher.files.put(key.*, stat.mtime) catch continue;
+                any_dirty = true;
+                break; // short-circuit
             }
         }
-    } else if (builtin.os.tag == .macos) {
-        var events: [16]std.posix.Kevent = undefined;
-        var ts = std.posix.timespec{
-            .sec = 0,
-            .nsec = 10_000,
-        };
 
-        while (!utils.shouldExit()) {
-            const n = std.posix.kevent(
-                watcher.kq,
-                &[_]std.posix.Kevent{},
-                events[0..],
-                &ts,
-            ) catch break;
-            if (n == 0) continue;
-
-            for (events[0..n]) |event| {
-                if (watcher.fd_to_path.get(@intCast(event.ident))) |path| {
-                    // NOTE_WRITE, NOTE_EXTEND, NOTE_ATTRIB
-                    if ((event.fflags & (std.posix.system.NOTE.WRITE | std.posix.system.NOTE.EXTEND | std.posix.system.NOTE.ATTRIB)) != 0) {
-                        if (!file_changed.load(.seq_cst)) {
-                            file_changed.store(true, .seq_cst);
-                        }
-                    }
-
-                    // NOTE_DELETE or NOTE_RENAME (file replaced)
-                    if ((event.fflags & (std.posix.system.NOTE.DELETE | std.posix.system.NOTE.RENAME)) != 0) {
-                        if (watcher.fds.get(path)) |old_fd| {
-                            _ = watcher.fds.remove(path);
-                            _ = std.posix.close(old_fd);
-                            _ = watcher.fd_to_path.remove(old_fd);
-                        }
-                        std.time.sleep(500 * std.time.ns_per_ms); // Give editor time to recreate
-                        const file: ?std.fs.File = std.fs.cwd().openFile(path, .{}) catch null;
-                        if (file) |new_file| {
-                            watcher.fds.put(path, new_file.handle) catch {};
-                            watcher.fd_to_path.put(new_file.handle, path) catch {};
-                            const kev = std.posix.Kevent{
-                                .ident = @intCast(new_file.handle),
-                                .filter = std.posix.system.EVFILT.VNODE,
-                                .flags = std.posix.system.EV.ENABLE | std.posix.system.EV.ADD | std.posix.system.EV.CLEAR,
-                                .fflags = std.posix.system.NOTE.WRITE | std.posix.system.NOTE.DELETE | std.posix.system.NOTE.RENAME | std.posix.system.NOTE.EXTEND | std.posix.system.NOTE.ATTRIB,
-                                .data = 0,
-                                .udata = 0,
-                            };
-                            _ = std.posix.kevent(
-                                watcher.kq,
-                                &[_]std.posix.Kevent{kev},
-                                &[_]std.posix.Kevent{},
-                                null,
-                            ) catch {};
-                        }
-                    }
-                }
+        if (any_dirty) {
+            last_change_time = std.time.nanoTimestamp();
+            if (!file_changed.load(.seq_cst)) {
+                file_changed.store(true, .seq_cst);
             }
         }
-    } else {
-        zlog.info("Starting polling watcher thread", .{});
-        // Polling fallback
-        while (!utils.shouldExit()) {
-            var keys = watcher.files.keyIterator();
-            while (keys.next()) |key| {
-                const file = std.fs.cwd().openFile(key.*, .{}) catch continue;
-                defer file.close();
-                const stat = file.stat() catch continue;
-                if (stat.mtime > watcher.files.get(key.*).?) {
-                    watcher.files.put(key.*, stat.mtime) catch continue;
-                    if (!file_changed.load(.seq_cst)) {
-                        file_changed.store(true, .seq_cst);
-                    }
-                }
-            }
-            std.time.sleep(100 * std.time.ns_per_ms);
+
+        var sleep_duration: u64 = active_sleep;
+        if (delta > 1_000_000_000) {
+            sleep_duration = idle_sleep;
         }
+        std.Thread.sleep(sleep_duration);
     }
 }
 
@@ -270,108 +158,8 @@ pub fn parseTasks(
     return flint;
 }
 
-pub const Watcher = if (builtin.os.tag == .linux)
-    LinuxWatcher
-else if (builtin.os.tag == .macos)
-    MacOSWatcher
-else
+pub const Watcher =
     PollingWatcher;
-
-const MacOSWatcher = struct {
-    kq: std.posix.fd_t,
-    files: std.StringHashMap(i128),
-    fds: std.StringHashMap(std.posix.fd_t), // path → fd
-    fd_to_path: std.AutoHashMap(std.posix.fd_t, []const u8), // fd → path
-
-    pub fn init(allocator: std.mem.Allocator, files: [][]const u8) !*MacOSWatcher {
-        var watcher = try allocator.create(MacOSWatcher);
-        watcher.* = MacOSWatcher{
-            .kq = try std.posix.kqueue(),
-            .files = std.StringHashMap(i128).init(allocator),
-            .fds = std.StringHashMap(std.posix.fd_t).init(allocator),
-            .fd_to_path = std.AutoHashMap(std.posix.fd_t, []const u8).init(allocator),
-        };
-
-        for (files) |glob| {
-            const expanded = try expandGlob(allocator, glob);
-            for (expanded) |file| {
-                const f = std.fs.cwd().openFile(file, .{}) catch continue;
-                const stat = try f.stat();
-                try watcher.files.put(file, stat.mtime);
-                try watcher.fds.put(file, f.handle);
-                try watcher.fd_to_path.put(f.handle, file);
-
-                const kev = std.posix.Kevent{
-                    .ident = @intCast(f.handle),
-                    .filter = std.posix.system.EVFILT.VNODE,
-                    .flags = std.posix.system.EV.ENABLE | std.posix.system.EV.ADD | std.posix.system.EV.CLEAR,
-                    .fflags = std.posix.system.NOTE.WRITE | std.posix.system.NOTE.DELETE | std.posix.system.NOTE.RENAME | std.posix.system.NOTE.EXTEND | std.posix.system.NOTE.ATTRIB,
-                    .data = 0,
-                    .udata = 0,
-                };
-
-                _ = try std.posix.kevent(
-                    watcher.kq,
-                    &[_]std.posix.Kevent{kev},
-                    &[_]std.posix.Kevent{},
-                    null,
-                );
-                // Don't close f, keep it open for kqueue
-            }
-        }
-        return watcher;
-    }
-
-    pub fn deinit(self: *MacOSWatcher) void {
-        var it = self.fds.valueIterator();
-        while (it.next()) |fd| {
-            _ = std.posix.close(fd.*);
-        }
-        self.fds.deinit();
-        self.fd_to_path.deinit();
-        self.files.deinit();
-        _ = std.posix.close(self.kq);
-    }
-};
-
-const LinuxWatcher = struct {
-    fd: std.os.linux.fd_t,
-    wd_map: std.StringHashMap(i32),
-
-    pub fn init(allocator: std.mem.Allocator, files: [][]const u8) !*LinuxWatcher {
-        var watcher = try allocator.create(LinuxWatcher);
-        watcher.* = LinuxWatcher{
-            .fd = @intCast(std.os.linux.inotify_init1(std.os.linux.IN.NONBLOCK)),
-            .wd_map = std.StringHashMap(i32).init(allocator),
-        };
-
-        for (files) |f| {
-            const expanded = try expandGlob(allocator, f);
-            for (expanded) |file| {
-                const mask = std.os.linux.IN.MODIFY | std.os.linux.IN.CLOSE_WRITE | std.os.linux.IN.MOVE_SELF | std.os.linux.IN.DELETE_SELF | std.os.linux.IN.ATTRIB;
-                const wd_raw = std.os.linux.inotify_add_watch(
-                    watcher.fd,
-                    try allocator.dupeZ(u8, file),
-                    mask,
-                );
-                const wd_lg: i64 = @bitCast(wd_raw);
-                const wd: i32 = @intCast(wd_lg);
-                if (wd < 0) return error.InotifyAddWatchFailed;
-                try watcher.wd_map.put(file, wd);
-            }
-        }
-        return watcher;
-    }
-
-    pub fn deinit(self: *LinuxWatcher) void {
-        var it = self.wd_map.valueIterator();
-        while (it.next()) |wd| {
-            _ = std.os.linux.inotify_rm_watch(self.fd, @intCast(wd.*));
-        }
-        self.wd_map.deinit();
-        _ = std.os.linux.close(self.fd);
-    }
-};
 
 const PollingWatcher = struct {
     files: std.StringHashMap(i128),
@@ -465,32 +253,4 @@ fn findFilesRecursive(
         }
     }
     return files.toOwnedSlice();
-}
-
-pub fn checkUpdate(watcher: *Watcher, file_changed: *std.atomic.Value(bool)) void {
-    while (!utils.shouldExit()) {
-        var keys = watcher.files.keyIterator();
-        while (keys.next()) |key| {
-            const file = std.fs.cwd().openFile(key.*, .{}) catch |err| {
-                switch (err) {
-                    error.FileNotFound => {
-                        continue;
-                    },
-                    else => {
-                        break;
-                    },
-                }
-            };
-            defer file.close();
-
-            const stat = file.stat() catch @panic("Cannot get file stat");
-            if (stat.mtime > watcher.files.get(key.*).?) {
-                watcher.files.put(key.*, stat.mtime) catch @panic("Failed to update file");
-                if (!file_changed.load(.seq_cst)) {
-                    file_changed.store(true, .seq_cst);
-                }
-            }
-        }
-        std.Thread.sleep(100_000);
-    }
 }

@@ -19,4 +19,6 @@ Example `flint.zon` file:
 }
 ```
 
-Running `flint watch build` will re-run the `build` command every time a file in `/src` is changed.
+In this example, running `flint watch build` will re-run the `build` command every time a file in `/src` is changed.
+
+Flint uses file polling to provide fast results with an emphasis on cross-platform compatibility.
