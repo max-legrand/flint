@@ -5,12 +5,18 @@ const utils = @import("utils.zig");
 
 pub const Task = struct {
     cmd: []const u8,
+    watcher: ?*Watcher,
 };
 
 pub const Tasks = struct {
     tasks: std.StringHashMap(Task),
 
     pub fn deinit(self: *Tasks) void {
+        for (self.tasks.values()) |task| {
+            if (task.watcher) |watcher| {
+                watcher.deinit();
+            }
+        }
         self.tasks.deinit();
     }
 };
@@ -18,48 +24,40 @@ pub const Tasks = struct {
 pub const TaskEntry = struct {
     name: []const u8,
     cmd: []const u8,
+    watcher: ?[][]const u8,
 };
 
 pub const Config = struct {
     tasks: []TaskEntry,
-    watcher: [][]const u8,
 };
 
 pub const Flint = struct {
     tasks: std.StringHashMap(Task),
-    watcher: ?*Watcher,
     threads: std.ArrayList(std.Thread),
     file_changed: *std.atomic.Value(bool),
 
     pub fn deinit(self: *Flint) void {
-        zlog.info("Deinitializing flint", .{});
-        self.tasks.deinit();
-        zlog.info("Joining threads", .{});
         for (self.threads.items) |thread| {
             thread.join();
         }
-        zlog.info("Deinitializing watcher", .{});
-
-        if (self.watcher) |watcher| {
-            watcher.deinit();
-        }
+        self.tasks.deinit();
     }
 
-    pub fn initWatcher(_: *Flint, allocator: std.mem.Allocator, files: [][]const u8) !*Watcher {
-        const watcher = try Watcher.init(allocator, files);
-
-        return watcher;
-    }
-
-    pub fn startWatcherThread(self: *Flint, allocator: std.mem.Allocator) !void {
+    pub fn startWatcherThread(self: *Flint, task: Task, allocator: std.mem.Allocator) !void {
         const thread = try std.Thread.spawn(
             .{ .allocator = allocator },
             watcherThread,
-            .{ self.watcher.?, self.file_changed },
+            .{ task.watcher.?, self.file_changed },
         );
         try self.threads.append(thread);
     }
 };
+
+pub fn initWatcher(allocator: std.mem.Allocator, files: [][]const u8) !*Watcher {
+    const watcher = try Watcher.init(allocator, files);
+
+    return watcher;
+}
 
 pub fn watcherThread(
     watcher: *Watcher,
@@ -128,7 +126,6 @@ fn valueToString(val: std.json.Value) []const u8 {
 pub fn parseTasks(
     allocator: std.mem.Allocator,
     filepath: []const u8,
-    command: []const u8,
 ) !Flint {
     const file = try std.fs.cwd().openFile(filepath, .{});
     defer file.close();
@@ -140,28 +137,23 @@ pub fn parseTasks(
     defer allocator.free(zon_data);
 
     const config = try std.zon.parse.fromSlice(Config, allocator, zon_data, null, .{});
-    if (std.mem.eql(u8, command, "watch") and config.watcher.len == 0) {
-        zlog.err("No watchers defined in config with `watch` command used", .{});
-        return error.NoWatchers;
-    }
 
     var tasks_map = std.StringHashMap(Task).init(allocator);
     for (config.tasks) |entry| {
-        try tasks_map.put(entry.name, Task{ .cmd = entry.cmd });
+        try tasks_map.put(entry.name, Task{
+            .cmd = entry.cmd,
+            .watcher = if (entry.watcher) |watcher| try initWatcher(allocator, watcher) else null,
+        });
     }
 
     const file_changed = try allocator.create(std.atomic.Value(bool));
     file_changed.* = std.atomic.Value(bool).init(false);
 
-    var flint = Flint{
+    const flint = Flint{
         .tasks = tasks_map,
-        .watcher = null,
         .threads = std.ArrayList(std.Thread).init(allocator),
         .file_changed = file_changed,
     };
-    if (std.mem.eql(u8, command, "watch")) {
-        flint.watcher = try flint.initWatcher(allocator, config.watcher);
-    }
 
     return flint;
 }

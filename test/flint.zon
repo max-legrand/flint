@@ -3,9 +3,7 @@
         .{
             .name = "echo",
             .cmd = "cat test.txt",
+            .watcher = .{"*"},
         },
-    },
-    .watcher = .{
-        "*",
     },
 }

@@ -69,7 +69,6 @@ pub fn main() !void {
     var flint_inst = try flint.parseTasks(
         allocator,
         "flint.zon",
-        command,
     );
 
     if (flint_inst.tasks.get(task)) |t| {
@@ -77,12 +76,12 @@ pub fn main() !void {
         if (std.mem.eql(u8, command, "run")) {
             try runCommand(allocator, t.cmd);
         } else {
-            zlog.info("Watching {d} files for changes", .{flint_inst.watcher.?.files.count()});
+            zlog.info("Watching {d} files for changes", .{t.watcher.?.files.count()});
             try runCommand(allocator, t.cmd);
             const debounce_ns = 200_000_000; // 200ms
             var last_run_time: i128 = 0;
 
-            try flint_inst.startWatcherThread(allocator);
+            try flint_inst.startWatcherThread(t, allocator);
 
             while (true) {
                 if (utils.shouldExit()) break;
