@@ -45,17 +45,19 @@ pub const Flint = struct {
         }
     }
 
-    pub fn initWatcher(self: *Flint, allocator: std.mem.Allocator, files: [][]const u8) !*Watcher {
+    pub fn initWatcher(_: *Flint, allocator: std.mem.Allocator, files: [][]const u8) !*Watcher {
         const watcher = try Watcher.init(allocator, files);
 
+        return watcher;
+    }
+
+    pub fn startWatcherThread(self: *Flint, allocator: std.mem.Allocator) !void {
         const thread = try std.Thread.spawn(
             .{ .allocator = allocator },
             watcherThread,
-            .{ watcher, self.file_changed },
+            .{ self.watcher.?, self.file_changed },
         );
         try self.threads.append(thread);
-
-        return watcher;
     }
 };
 
@@ -68,6 +70,7 @@ pub fn watcherThread(
     const idle_sleep = 200 * std.time.ns_per_ms;
     const active_sleep = 50 * std.time.ns_per_ms;
     var last_change_time: i128 = std.time.milliTimestamp();
+    const delta_threshold_ms = 1000;
 
     while (!utils.shouldExit()) {
         const now = std.time.milliTimestamp();
@@ -85,6 +88,7 @@ pub fn watcherThread(
             if (stat.mtime > old) {
                 watcher.files.put(key.*, stat.mtime) catch continue;
                 any_dirty = true;
+                zlog.info("Triggering task - {s} changed", .{key.*});
                 break; // short-circuit
             }
         }
@@ -97,7 +101,7 @@ pub fn watcherThread(
         }
 
         var sleep_duration: u64 = active_sleep;
-        if (delta > 1_000_000_000) {
+        if (delta > delta_threshold_ms) {
             sleep_duration = idle_sleep;
         }
         std.Thread.sleep(sleep_duration);
@@ -136,6 +140,10 @@ pub fn parseTasks(
     defer allocator.free(zon_data);
 
     const config = try std.zon.parse.fromSlice(Config, allocator, zon_data, null, .{});
+    if (std.mem.eql(u8, command, "watch") and config.watcher.len == 0) {
+        zlog.err("No watchers defined in config with `watch` command used", .{});
+        return error.NoWatchers;
+    }
 
     var tasks_map = std.StringHashMap(Task).init(allocator);
     for (config.tasks) |entry| {
@@ -191,8 +199,13 @@ fn expandGlob(
     allocator: std.mem.Allocator,
     pattern: []const u8,
 ) ![][]const u8 {
-    // Only supports "*.zig" and "**/*.zig" for now
-    if (std.mem.startsWith(u8, pattern, "**/")) {
+    if (std.mem.eql(u8, pattern, "*")) {
+        // Match all files in current directory
+        return try findFilesInDir(allocator, ".", "*");
+    } else if (std.mem.eql(u8, pattern, "./*")) {
+        // Match all files in current directory
+        return try findFilesInDir(allocator, ".", "*");
+    } else if (std.mem.startsWith(u8, pattern, "**/")) {
         // Recursive search
         const subpattern = pattern[3..];
         return try findFilesRecursive(allocator, ".", subpattern);
@@ -224,9 +237,13 @@ fn findFilesInDir(
 
     var it = dir.iterate();
     while (try it.next()) |entry| {
-        if (entry.kind == .file and std.mem.endsWith(u8, entry.name, pattern[1..])) {
-            const full_path = try std.fs.path.join(allocator, &.{ dir_path, entry.name });
-            try files.append(full_path);
+        if (entry.kind == .file) {
+            if (std.mem.eql(u8, pattern, "*") or
+                (std.mem.startsWith(u8, pattern, "*.") and std.mem.endsWith(u8, entry.name, pattern[1..])))
+            {
+                const full_path = try std.fs.path.join(allocator, &.{ dir_path, entry.name });
+                try files.append(full_path);
+            }
         }
     }
     return files.toOwnedSlice();
