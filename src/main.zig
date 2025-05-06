@@ -98,7 +98,9 @@ pub fn main() !void {
             try runTaskAndDeps(allocator, t);
         } else {
             zlog.info("Watching {d} files for changes", .{t.watcher.?.files.count()});
-            try runTaskAndDeps(allocator, t);
+            runTaskAndDeps(allocator, t) catch {
+                zlog.err("Task '{s}' failed", .{t.name});
+            };
             const debounce_ns = 200_000_000; // 200ms
             var last_run_time: i128 = 0;
 
@@ -112,7 +114,9 @@ pub fn main() !void {
                 if (flint_inst.file_changed.swap(false, .seq_cst)) {
                     const now = std.time.nanoTimestamp();
                     if (now - last_run_time > debounce_ns) {
-                        try runTaskAndDeps(allocator, t);
+                        runTaskAndDeps(allocator, t) catch {
+                            zlog.err("Task '{s}' failed", .{t.name});
+                        };
                         last_run_time = now;
                     }
                 }
@@ -165,6 +169,10 @@ fn runCommandInternal(allocator: std.mem.Allocator, cmd: []const u8) !void {
 }
 
 fn runTaskAndDeps(allocator: std.mem.Allocator, task: *flint.Task) !void {
+    if (task.deps_tasks.len == 0) {
+        try runCommandInternal(allocator, task.cmd orelse return);
+        return;
+    }
     for (task.deps_tasks) |dep| {
         if (dep.cmd) |cmd| {
             try runCommandInternal(allocator, cmd);
