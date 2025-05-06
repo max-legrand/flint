@@ -158,7 +158,10 @@ fn runCommandInternal(allocator: std.mem.Allocator, cmd: []const u8) !void {
         }
     }
 
-    _ = try child.wait();
+    const result = try child.wait();
+    if (result.Exited != 0) {
+        return error.CommandFailed;
+    }
 }
 
 fn runTaskAndDeps(allocator: std.mem.Allocator, task: *flint.Task) !void {
