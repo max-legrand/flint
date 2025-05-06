@@ -18,20 +18,9 @@ pub fn main() !void {
 
     const allocator = arena.allocator();
 
-    try zlog.initGlobalLogger(
-        .INFO,
-        true,
-        null,
-        null,
-        null,
-        allocator,
-    );
-    defer zlog.deinitGlobalLogger();
-
     try utils.setAbortSignalHandler();
 
-    zlog.info("Flint v{d}.{d}.{d}", .{ major, minor, patch });
-
+    var verbose = false;
     var args_iter = std.process.args();
     defer args_iter.deinit();
 
@@ -39,8 +28,25 @@ pub fn main() !void {
     defer args.deinit();
 
     while (args_iter.next()) |arg| {
+        if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verbose")) {
+            verbose = true;
+            continue;
+        }
         try args.append(arg);
     }
+
+    const log_level: zlog.Logger.Level = if (verbose) .DEBUG else .INFO;
+
+    try zlog.initGlobalLogger(
+        log_level,
+        true,
+        null,
+        null,
+        null,
+        allocator,
+    );
+    defer zlog.deinitGlobalLogger();
+    zlog.info("Flint v{d}.{d}.{d}", .{ major, minor, patch });
 
     if (args.items.len < 2) {
         zlog.err("Usage: flint <run|watch> <task>", .{});
@@ -66,18 +72,33 @@ pub fn main() !void {
 
     const task = if (clean_args.items.len > 1) clean_args.items[1] else "";
 
-    var flint_inst = try flint.parseTasks(
+    var flint_inst = flint.parseTasks(
         allocator,
         "flint.zon",
-    );
+    ) catch |err| {
+        switch (err) {
+            error.TaskHasNoCommandOrDeps => {
+                zlog.err("Task '{s}' has no command or dependencies", .{task});
+                return err;
+            },
+            else => {
+                return err;
+            },
+        }
+    };
 
     if (flint_inst.tasks.get(task)) |t| {
-        zlog.debug("Running command '{s}' with task '{s}'", .{ command, t.cmd });
+        zlog.debug("Task Deps:", .{});
+        for (t.deps_tasks) |dep| {
+            if (dep.cmd) |cmd| {
+                zlog.debug("  - {s}", .{cmd});
+            }
+        }
         if (std.mem.eql(u8, command, "run")) {
-            try runCommand(allocator, t.cmd);
+            try runTaskAndDeps(allocator, t);
         } else {
             zlog.info("Watching {d} files for changes", .{t.watcher.?.files.count()});
-            try runCommand(allocator, t.cmd);
+            try runTaskAndDeps(allocator, t);
             const debounce_ns = 200_000_000; // 200ms
             var last_run_time: i128 = 0;
 
@@ -91,7 +112,7 @@ pub fn main() !void {
                 if (flint_inst.file_changed.swap(false, .seq_cst)) {
                     const now = std.time.nanoTimestamp();
                     if (now - last_run_time > debounce_ns) {
-                        try runCommand(allocator, t.cmd);
+                        try runTaskAndDeps(allocator, t);
                         last_run_time = now;
                     }
                 }
@@ -105,7 +126,7 @@ pub fn main() !void {
     flint_inst.deinit();
 }
 
-fn runCommand(allocator: std.mem.Allocator, cmd: []const u8) !void {
+fn runCommandInternal(allocator: std.mem.Allocator, cmd: []const u8) !void {
     zlog.info("Running command '{s}'", .{cmd});
 
     const args_slice = if (builtin.os.tag == .macos)
@@ -138,4 +159,12 @@ fn runCommand(allocator: std.mem.Allocator, cmd: []const u8) !void {
     }
 
     _ = try child.wait();
+}
+
+fn runTaskAndDeps(allocator: std.mem.Allocator, task: *flint.Task) !void {
+    for (task.deps_tasks) |dep| {
+        if (dep.cmd) |cmd| {
+            try runCommandInternal(allocator, cmd);
+        }
+    }
 }

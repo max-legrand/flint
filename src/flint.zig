@@ -4,8 +4,11 @@ const builtin = @import("builtin");
 const utils = @import("utils.zig");
 
 pub const Task = struct {
-    cmd: []const u8,
+    name: []const u8,
+    cmd: ?[]const u8,
     watcher: ?*Watcher,
+    deps: [][]const u8,
+    deps_tasks: []const *Task,
 };
 
 pub const Tasks = struct {
@@ -23,8 +26,9 @@ pub const Tasks = struct {
 
 pub const TaskEntry = struct {
     name: []const u8,
-    cmd: []const u8,
-    watcher: ?[][]const u8,
+    cmd: ?[]const u8 = null,
+    watcher: ?[][]const u8 = null,
+    deps: ?[][]const u8 = null,
 };
 
 pub const Config = struct {
@@ -32,7 +36,7 @@ pub const Config = struct {
 };
 
 pub const Flint = struct {
-    tasks: std.StringHashMap(Task),
+    tasks: std.StringHashMap(*Task),
     threads: std.ArrayList(std.Thread),
     file_changed: *std.atomic.Value(bool),
 
@@ -43,7 +47,7 @@ pub const Flint = struct {
         self.tasks.deinit();
     }
 
-    pub fn startWatcherThread(self: *Flint, task: Task, allocator: std.mem.Allocator) !void {
+    pub fn startWatcherThread(self: *Flint, task: *Task, allocator: std.mem.Allocator) !void {
         const thread = try std.Thread.spawn(
             .{ .allocator = allocator },
             watcherThread,
@@ -123,6 +127,49 @@ fn valueToString(val: std.json.Value) []const u8 {
     return val.string;
 }
 
+// Helper function for DFS
+fn visit(
+    allocator: std.mem.Allocator,
+    task: *Task,
+    tasks: *const std.StringHashMap(*Task),
+    visited: *std.StringHashMap(bool),
+    sorted: *std.ArrayList(*Task),
+    stack: *std.StringHashMap(bool),
+) !void {
+    if (visited.get(task.name)) |_| {
+        return;
+    }
+    if (stack.get(task.name)) |_| {
+        return error.CycleDetected;
+    }
+    try stack.put(task.name, true);
+
+    for (task.deps) |dep_name| {
+        const dep_task = tasks.get(dep_name) orelse
+            return error.DependencyNotFound;
+        try visit(allocator, dep_task, tasks, visited, sorted, stack);
+    }
+    _ = stack.remove(task.name);
+    try visited.put(task.name, true);
+    try sorted.append(task);
+}
+
+pub fn topologicalSort(
+    allocator: std.mem.Allocator,
+    start: *Task,
+    tasks: std.StringHashMap(*Task),
+) ![]const *Task {
+    var sorted = std.ArrayList(*Task).init(allocator);
+    var visited = std.StringHashMap(bool).init(allocator);
+    var stack = std.StringHashMap(bool).init(allocator); // for cycle detection
+    defer visited.deinit();
+    defer stack.deinit();
+
+    try visit(allocator, start, &tasks, &visited, &sorted, &stack);
+
+    return sorted.toOwnedSlice();
+}
+
 pub fn parseTasks(
     allocator: std.mem.Allocator,
     filepath: []const u8,
@@ -138,12 +185,30 @@ pub fn parseTasks(
 
     const config = try std.zon.parse.fromSlice(Config, allocator, zon_data, null, .{});
 
-    var tasks_map = std.StringHashMap(Task).init(allocator);
+    var tasks_map = std.StringHashMap(*Task).init(allocator);
     for (config.tasks) |entry| {
-        try tasks_map.put(entry.name, Task{
+        const task = try allocator.create(Task);
+        task.* = Task{
+            .name = entry.name,
             .cmd = entry.cmd,
+            .deps = entry.deps orelse &[_][]const u8{},
             .watcher = if (entry.watcher) |watcher| try initWatcher(allocator, watcher) else null,
-        });
+            .deps_tasks = &[_]*Task{},
+        };
+        try tasks_map.put(entry.name, task);
+    }
+
+    var iter = tasks_map.iterator();
+    while (iter.next()) |entry| {
+        const key = entry.key_ptr.*;
+        zlog.debug("Mapping deps for task '{s}'", .{key});
+        var value = entry.value_ptr.*;
+        if (value.deps.len > 0) {
+            value.deps_tasks = try topologicalSort(allocator, value, tasks_map);
+            try tasks_map.put(key, value);
+        } else if (value.cmd == null) {
+            return error.TaskHasNoCommandOrDeps;
+        }
     }
 
     const file_changed = try allocator.create(std.atomic.Value(bool));

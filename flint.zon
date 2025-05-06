@@ -1,0 +1,18 @@
+.{
+    .tasks = .{ .{
+        .name = "remove",
+        .cmd = "rm ~/bin/flint",
+        .deps = .{"mkdir"},
+    }, .{
+        .name = "mkdir",
+        .cmd = "mkdir -p ~/bin",
+    }, .{
+        .name = "build",
+        .cmd = "zig build --release=safe -fincremental",
+        .watcher = .{"**/*.zig"},
+    }, .{
+        .name = "install",
+        .cmd = "cp ./zig-out/bin/flint ~/bin/flint",
+        .deps = .{ "mkdir", "remove", "build" },
+    } },
+}
