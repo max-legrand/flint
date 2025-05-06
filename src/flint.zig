@@ -75,6 +75,22 @@ pub fn watcherThread(
     const delta_threshold_ms = 1000;
 
     while (!utils.shouldExit()) {
+        for (watcher.globs) |glob| {
+            const expanded = expandGlob(watcher.allocator, glob) catch continue;
+            defer watcher.allocator.free(expanded);
+            for (expanded) |file| {
+                if (!watcher.files.contains(file)) {
+                    // New file detected!
+                    const f = std.fs.cwd().openFile(file, .{}) catch continue;
+                    defer f.close();
+                    const stat = f.stat() catch continue;
+                    const file_copy = watcher.allocator.dupe(u8, file) catch continue;
+                    watcher.files.put(file_copy, stat.mtime) catch continue;
+                    zlog.info("New file detected: {s}", .{file});
+                    file_changed.store(true, .seq_cst);
+                }
+            }
+        }
         const now = std.time.milliTimestamp();
         const delta = now - last_change_time;
 
@@ -228,11 +244,15 @@ pub const Watcher =
 
 const PollingWatcher = struct {
     files: std.StringHashMap(i128),
+    globs: [][]const u8,
+    allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator, files: [][]const u8) !*PollingWatcher {
         var watcher = try allocator.create(PollingWatcher);
         watcher.* = PollingWatcher{
             .files = std.StringHashMap(i128).init(allocator),
+            .globs = try allocator.dupe([]const u8, files),
+            .allocator = allocator,
         };
 
         for (files) |glob| {
