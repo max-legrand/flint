@@ -114,6 +114,8 @@ pub fn main() !void {
                 if (flint_inst.file_changed.swap(false, .seq_cst)) {
                     const now = std.time.nanoTimestamp();
                     if (now - last_run_time > debounce_ns) {
+                        killRunningProcess(&running_process);
+
                         runTaskAndDeps(allocator, t) catch {
                             zlog.err("Task '{s}' failed", .{t.name});
                         };
@@ -130,7 +132,14 @@ pub fn main() !void {
     flint_inst.deinit();
 }
 
-fn runCommandInternal(allocator: std.mem.Allocator, cmd: []const u8) !void {
+const RunningProcess = struct {
+    mutex: std.Thread.Mutex = .{},
+    child: ?*std.process.Child = null,
+};
+
+var running_process = RunningProcess{};
+
+fn runCommandInternal(allocator: std.mem.Allocator, cmd: []const u8, running_proc: *RunningProcess) !void {
     zlog.info("Running command '{s}'", .{cmd});
 
     const args_slice = if (builtin.os.tag == .macos)
@@ -143,6 +152,16 @@ fn runCommandInternal(allocator: std.mem.Allocator, cmd: []const u8) !void {
     child.stderr_behavior = .Pipe;
 
     try child.spawn();
+
+    running_proc.mutex.lock();
+    running_proc.child = &child;
+    running_proc.mutex.unlock();
+
+    defer {
+        running_proc.mutex.lock();
+        running_proc.child = null;
+        running_proc.mutex.unlock();
+    }
 
     if (child.stdout) |stdout| {
         var buf: [1024]u8 = undefined;
@@ -168,14 +187,23 @@ fn runCommandInternal(allocator: std.mem.Allocator, cmd: []const u8) !void {
     }
 }
 
+fn killRunningProcess(running_proc: *RunningProcess) void {
+    running_proc.mutex.lock();
+    if (running_proc.child) |child| {
+        // Try to kill the process
+        _ = child.kill() catch {};
+    }
+    running_proc.mutex.unlock();
+}
+
 fn runTaskAndDeps(allocator: std.mem.Allocator, task: *flint.Task) !void {
     if (task.deps_tasks.len == 0) {
-        try runCommandInternal(allocator, task.cmd orelse return);
+        try runCommandInternal(allocator, task.cmd orelse return, &running_process);
         return;
     }
     for (task.deps_tasks) |dep| {
         if (dep.cmd) |cmd| {
-            try runCommandInternal(allocator, cmd);
+            try runCommandInternal(allocator, cmd, &running_process);
         }
     }
 }
