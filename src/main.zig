@@ -101,7 +101,10 @@ pub fn main() !void {
 
             while (true) {
                 if (utils.shouldExit()) break;
-                try flint.watchUntilUpdate(t.watcher.?);
+                flint.watchUntilUpdate(t.watcher.?) catch {
+                    // Error occurs when we hit the "shouldExit" condition
+                    return;
+                };
 
                 const now = std.time.nanoTimestamp();
                 if (now - last_run_time > debounce_ns) {

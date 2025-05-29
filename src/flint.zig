@@ -120,13 +120,13 @@ pub fn watchUntilUpdate(watcher: *Watcher) !void {
                 watcher.files.put(name, stat.mtime) catch continue;
                 any_dirty = true;
                 zlog.info("Triggering task - {s} changed", .{name});
-                break; // short-circuit
+                return; // short-circuit
             }
         }
 
         if (any_dirty) {
             last_change_time = std.time.nanoTimestamp();
-            break;
+            return;
         }
 
         var sleep_duration: u64 = active_sleep;
@@ -135,6 +135,7 @@ pub fn watchUntilUpdate(watcher: *Watcher) !void {
         }
         std.Thread.sleep(sleep_duration);
     }
+    return error.WatcherExited;
 }
 
 // --- Helper functions ---
