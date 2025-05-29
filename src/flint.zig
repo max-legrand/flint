@@ -1,6 +1,5 @@
 const std = @import("std");
 const zlog = @import("zlog");
-const builtin = @import("builtin");
 const utils = @import("utils.zig");
 
 pub const Task = struct {
@@ -9,19 +8,6 @@ pub const Task = struct {
     watcher: ?*Watcher,
     deps: [][]const u8,
     deps_tasks: []const *Task,
-};
-
-pub const Tasks = struct {
-    tasks: std.StringHashMap(Task),
-
-    pub fn deinit(self: *Tasks) void {
-        for (self.tasks.values()) |task| {
-            if (task.watcher) |watcher| {
-                watcher.deinit();
-            }
-        }
-        self.tasks.deinit();
-    }
 };
 
 pub const TaskEntry = struct {
@@ -37,85 +23,110 @@ pub const Config = struct {
 
 pub const Flint = struct {
     tasks: std.StringHashMap(*Task),
-    threads: std.ArrayList(std.Thread),
     file_changed: *std.atomic.Value(bool),
 
     pub fn deinit(self: *Flint) void {
-        for (self.threads.items) |thread| {
-            thread.join();
+        var iter = self.tasks.iterator();
+        while (iter.next()) |entry| {
+            const value = entry.value_ptr.*;
+            if (value.watcher) |watcher| {
+                watcher.deinit();
+            }
         }
         self.tasks.deinit();
     }
+};
 
-    pub fn startWatcherThread(self: *Flint, task: *Task, allocator: std.mem.Allocator) !void {
-        const thread = try std.Thread.spawn(
-            .{ .allocator = allocator },
-            watcherThread,
-            .{ task.watcher.?, self.file_changed },
-        );
-        try self.threads.append(thread);
+pub fn initWatcher(allocator: std.mem.Allocator, globs: [][]const u8) !*Watcher {
+    return try Watcher.init(allocator, globs);
+}
+
+/// --- Minimal, robust watcher ---
+pub const Watcher = struct {
+    files: std.StringHashMap(i128), // abs path -> mtime
+    globs: [][]const u8,
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator, globs: [][]const u8) !*Watcher {
+        var watcher = try allocator.create(Watcher);
+        watcher.* = Watcher{
+            .files = std.StringHashMap(i128).init(allocator),
+            .globs = try allocator.dupe([]const u8, globs),
+            .allocator = allocator,
+        };
+        try watcher.rescan();
+        return watcher;
+    }
+
+    /// Rescan globs and add any new files to the watcher
+    pub fn rescan(self: *Watcher) !void {
+        for (self.globs) |glob| {
+            const expanded = try expandGlob(self.allocator, glob);
+            for (expanded) |file| {
+                const abs_path = try getAbsolutePath(self.allocator, file);
+                if (!self.files.contains(abs_path)) {
+                    const path_copy = try self.allocator.dupe(u8, abs_path);
+                    const f = std.fs.cwd().openFile(path_copy, .{}) catch continue;
+                    defer f.close();
+                    const stat = try f.stat();
+                    try self.files.put(path_copy, stat.mtime);
+                }
+            }
+        }
+    }
+
+    pub fn deinit(self: *Watcher) void {
+        var it = self.files.keyIterator();
+        while (it.next()) |key| {
+            self.allocator.free(key.*);
+        }
+        self.files.deinit();
+        self.allocator.free(self.globs);
     }
 };
 
-pub fn initWatcher(allocator: std.mem.Allocator, files: [][]const u8) !*Watcher {
-    const watcher = try Watcher.init(allocator, files);
-
-    return watcher;
-}
-
-pub fn watcherThread(
-    watcher: *Watcher,
-    file_changed: *std.atomic.Value(bool),
-) void {
-    zlog.info("Starting polling watcher thread", .{});
-
+pub fn watchUntilUpdate(watcher: *Watcher) !void {
+    zlog.info("Starting polling watcher", .{});
+    const rescan_interval_ms: i128 = 2000;
     const idle_sleep = 200 * std.time.ns_per_ms;
     const active_sleep = 50 * std.time.ns_per_ms;
+    var last_rescan: i128 = std.time.milliTimestamp();
     var last_change_time: i128 = std.time.milliTimestamp();
     const delta_threshold_ms = 1000;
 
     while (!utils.shouldExit()) {
-        for (watcher.globs) |glob| {
-            const expanded = expandGlob(watcher.allocator, glob) catch continue;
-            defer watcher.allocator.free(expanded);
-            for (expanded) |file| {
-                if (!watcher.files.contains(file)) {
-                    // New file detected!
-                    const f = std.fs.cwd().openFile(file, .{}) catch continue;
-                    defer f.close();
-                    const stat = f.stat() catch continue;
-                    const file_copy = watcher.allocator.dupe(u8, file) catch continue;
-                    watcher.files.put(file_copy, stat.mtime) catch continue;
-                    zlog.info("New file detected: {s}", .{file});
-                    file_changed.store(true, .seq_cst);
-                }
-            }
-        }
         const now = std.time.milliTimestamp();
         const delta = now - last_change_time;
+
+        // Rescan globs for new files every rescan_interval_ms
+        if (now - last_rescan > rescan_interval_ms) {
+            watcher.rescan() catch |err| {
+                zlog.err("Watcher rescan failed: {}", .{err});
+            };
+            last_rescan = now;
+        }
 
         var keys = watcher.files.keyIterator();
         var any_dirty = false;
 
         while (keys.next()) |key| {
-            const file = std.fs.cwd().openFile(key.*, .{}) catch continue;
+            const name = key.*;
+            const file = std.fs.cwd().openFile(name, .{}) catch continue;
             defer file.close();
             const stat = file.stat() catch continue;
 
-            const old = watcher.files.get(key.*).?;
+            const old = watcher.files.get(name).?;
             if (stat.mtime > old) {
-                watcher.files.put(key.*, stat.mtime) catch continue;
+                watcher.files.put(name, stat.mtime) catch continue;
                 any_dirty = true;
-                zlog.info("Triggering task - {s} changed", .{key.*});
+                zlog.info("Triggering task - {s} changed", .{name});
                 break; // short-circuit
             }
         }
 
         if (any_dirty) {
             last_change_time = std.time.nanoTimestamp();
-            if (!file_changed.load(.seq_cst)) {
-                file_changed.store(true, .seq_cst);
-            }
+            break;
         }
 
         var sleep_duration: u64 = active_sleep;
@@ -126,19 +137,108 @@ pub fn watcherThread(
     }
 }
 
-pub fn map(
-    allocator: std.mem.Allocator,
-    comptime In: type,
-    comptime Out: type,
-    input: []const In,
-    comptime func: fn (In) Out,
-) ![]Out {
-    var result = try allocator.alloc(Out, input.len);
-    for (input, 0..) |item, i| {
-        result[i] = func(item);
-    }
-    return result;
+// --- Helper functions ---
+
+fn getAbsolutePath(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
+    return try std.fs.realpathAlloc(allocator, path);
 }
+
+/// Only supports:
+///   - "dir/*" (all files in dir)
+///   - "dir/*.ext" (all files in dir with extension)
+///   - "dir/**/*.ext" (all files recursively in dir with extension)
+///   - "file" (literal file)
+fn expandGlob(
+    allocator: std.mem.Allocator,
+    pattern: []const u8,
+) ![][]const u8 {
+    // Handle recursive globs like "dir/**/*.ext"
+    if (std.mem.containsAtLeast(u8, pattern, 1, "**/")) {
+        if (std.mem.indexOf(u8, pattern, "**/")) |idx| {
+            const dir = if (idx == 0) "." else pattern[0..idx];
+            const subpattern = pattern[idx + 3 ..];
+            return try findFilesRecursive(allocator, dir, subpattern);
+        }
+    }
+
+    // Find last '/' to split dir and pattern
+    if (std.mem.lastIndexOf(u8, pattern, "/")) |slash| {
+        const dir = pattern[0..slash];
+        const subpattern = pattern[slash + 1 ..];
+        if (std.mem.eql(u8, subpattern, "*")) {
+            return try findFilesInDir(allocator, dir, "*");
+        } else if (std.mem.startsWith(u8, subpattern, "*.")) {
+            return try findFilesInDir(allocator, dir, subpattern);
+        } else {
+            // No glob in subpattern, treat as literal file
+            var list = try allocator.alloc([]const u8, 1);
+            list[0] = pattern;
+            return list;
+        }
+    }
+
+    // Fallback: treat as literal file
+    var list = try allocator.alloc([]const u8, 1);
+    list[0] = pattern;
+    return list;
+}
+
+fn findFilesInDir(
+    allocator: std.mem.Allocator,
+    dir_path: []const u8,
+    pattern: []const u8,
+) ![][]const u8 {
+    var dir = try std.fs.cwd().openDir(dir_path, .{ .iterate = true });
+    defer dir.close();
+
+    var files = std.ArrayList([]const u8).init(allocator);
+
+    var it = dir.iterate();
+    while (try it.next()) |entry| {
+        if (entry.kind == .file) {
+            if (std.mem.eql(u8, pattern, "*") or
+                (std.mem.startsWith(u8, pattern, "*.") and std.mem.endsWith(u8, entry.name, pattern[1..])))
+            {
+                const full_path = try std.fs.path.join(allocator, &.{ dir_path, entry.name });
+                try files.append(full_path);
+            }
+        }
+    }
+    return files.toOwnedSlice();
+}
+
+fn findFilesRecursive(
+    allocator: std.mem.Allocator,
+    dir_path: []const u8,
+    pattern: []const u8,
+) ![][]const u8 {
+    var files = std.ArrayList([]const u8).init(allocator);
+
+    var dir = try std.fs.cwd().openDir(dir_path, .{ .iterate = true });
+    defer dir.close();
+
+    var it = dir.iterate();
+    while (try it.next()) |entry| {
+        const full_path = try std.fs.path.join(allocator, &.{ dir_path, entry.name });
+        if (entry.kind == .file) {
+            if (std.mem.eql(u8, pattern, "*") or
+                (std.mem.startsWith(u8, pattern, "*.") and std.mem.endsWith(u8, entry.name, pattern[1..])))
+            {
+                try files.append(full_path);
+            }
+        } else if (entry.kind == .directory and
+            !std.mem.eql(u8, entry.name, ".") and
+            !std.mem.eql(u8, entry.name, ".."))
+        {
+            const subfiles = try findFilesRecursive(allocator, full_path, pattern);
+            for (subfiles) |f| try files.append(f);
+        }
+    }
+    return files.toOwnedSlice();
+}
+
+// --- Topological sort and task parsing (unchanged) ---
+
 fn valueToString(val: std.json.Value) []const u8 {
     return val.string;
 }
@@ -194,10 +294,7 @@ pub fn parseTasks(
     defer file.close();
 
     const data = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
-    defer allocator.free(data);
-
     const zon_data = try allocator.dupeZ(u8, data);
-    defer allocator.free(zon_data);
 
     const config = try std.zon.parse.fromSlice(Config, allocator, zon_data, null, .{});
 
@@ -232,119 +329,8 @@ pub fn parseTasks(
 
     const flint = Flint{
         .tasks = tasks_map,
-        .threads = std.ArrayList(std.Thread).init(allocator),
         .file_changed = file_changed,
     };
 
     return flint;
-}
-
-pub const Watcher =
-    PollingWatcher;
-
-const PollingWatcher = struct {
-    files: std.StringHashMap(i128),
-    globs: [][]const u8,
-    allocator: std.mem.Allocator,
-
-    pub fn init(allocator: std.mem.Allocator, files: [][]const u8) !*PollingWatcher {
-        var watcher = try allocator.create(PollingWatcher);
-        watcher.* = PollingWatcher{
-            .files = std.StringHashMap(i128).init(allocator),
-            .globs = try allocator.dupe([]const u8, files),
-            .allocator = allocator,
-        };
-
-        for (files) |glob| {
-            const expanded = try expandGlob(allocator, glob);
-            for (expanded) |file| {
-                const f = std.fs.cwd().openFile(file, .{}) catch continue;
-                defer f.close();
-                const stat = try f.stat();
-                try watcher.files.put(file, stat.mtime);
-            }
-        }
-        return watcher;
-    }
-
-    pub fn deinit(self: *PollingWatcher) void {
-        self.files.deinit();
-    }
-};
-
-fn expandGlob(
-    allocator: std.mem.Allocator,
-    pattern: []const u8,
-) ![][]const u8 {
-    if (std.mem.eql(u8, pattern, "*")) {
-        // Match all files in current directory
-        return try findFilesInDir(allocator, ".", "*");
-    } else if (std.mem.eql(u8, pattern, "./*")) {
-        // Match all files in current directory
-        return try findFilesInDir(allocator, ".", "*");
-    } else if (std.mem.startsWith(u8, pattern, "**/")) {
-        // Recursive search
-        const subpattern = pattern[3..];
-        return try findFilesRecursive(allocator, ".", subpattern);
-    } else if (std.mem.startsWith(u8, pattern, "*.")) {
-        // Non-recursive search in cwd
-        return try findFilesInDir(allocator, ".", pattern);
-    } else if (std.mem.indexOf(u8, pattern, "*")) |star| {
-        // e.g. "src/*.zig"
-        const dir = pattern[0 .. star - 1];
-        const subpattern = pattern[star..];
-        return try findFilesInDir(allocator, dir, subpattern);
-    } else {
-        // Not a glob, just return the file itself
-        var list = try allocator.alloc([]const u8, 1);
-        list[0] = pattern;
-        return list;
-    }
-}
-
-fn findFilesInDir(
-    allocator: std.mem.Allocator,
-    dir_path: []const u8,
-    pattern: []const u8,
-) ![][]const u8 {
-    var dir = try std.fs.cwd().openDir(dir_path, .{ .iterate = true });
-    defer dir.close();
-
-    var files = std.ArrayList([]const u8).init(allocator);
-
-    var it = dir.iterate();
-    while (try it.next()) |entry| {
-        if (entry.kind == .file) {
-            if (std.mem.eql(u8, pattern, "*") or
-                (std.mem.startsWith(u8, pattern, "*.") and std.mem.endsWith(u8, entry.name, pattern[1..])))
-            {
-                const full_path = try std.fs.path.join(allocator, &.{ dir_path, entry.name });
-                try files.append(full_path);
-            }
-        }
-    }
-    return files.toOwnedSlice();
-}
-
-fn findFilesRecursive(
-    allocator: std.mem.Allocator,
-    dir_path: []const u8,
-    pattern: []const u8,
-) ![][]const u8 {
-    var files = std.ArrayList([]const u8).init(allocator);
-
-    var dir = try std.fs.cwd().openDir(dir_path, .{ .iterate = true });
-    defer dir.close();
-
-    var it = dir.iterate();
-    while (try it.next()) |entry| {
-        const full_path = try std.fs.path.join(allocator, &.{ dir_path, entry.name });
-        if (entry.kind == .file and std.mem.endsWith(u8, entry.name, pattern[1..])) {
-            try files.append(full_path);
-        } else if (entry.kind == .directory and !std.mem.eql(u8, entry.name, ".") and !std.mem.eql(u8, entry.name, "..")) {
-            const subfiles = try findFilesRecursive(allocator, full_path, pattern);
-            for (subfiles) |f| try files.append(f);
-        }
-    }
-    return files.toOwnedSlice();
 }

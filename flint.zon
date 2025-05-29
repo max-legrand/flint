@@ -14,5 +14,9 @@
         .name = "install",
         .cmd = "cp ./zig-out/bin/flint ~/bin/flint",
         .deps = .{ "mkdir", "remove", "build" },
+    }, .{
+        .name = "test",
+        .cmd = "echo \"running\"",
+        .watcher = .{ "**/*.zig", "**/*.txt" },
     } },
 }

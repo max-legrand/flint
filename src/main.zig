@@ -15,7 +15,6 @@ pub fn main() !void {
 
     var arena = std.heap.ArenaAllocator.init(gpa_allocator);
     defer arena.deinit();
-
     const allocator = arena.allocator();
 
     try utils.setAbortSignalHandler();
@@ -37,14 +36,7 @@ pub fn main() !void {
 
     const log_level: zlog.Logger.Level = if (verbose) .DEBUG else .INFO;
 
-    try zlog.initGlobalLogger(
-        log_level,
-        true,
-        null,
-        null,
-        null,
-        allocator,
-    );
+    try zlog.initGlobalLogger(log_level, true, null, null, null, allocator);
     defer zlog.deinitGlobalLogger();
     zlog.info("Flint v{d}.{d}.{d}", .{ major, minor, patch });
 
@@ -65,6 +57,9 @@ pub fn main() !void {
     }
 
     const command = clean_args.items[0];
+    if (std.mem.eql(u8, command, "version")) {
+        return;
+    }
     if (!std.mem.eql(u8, command, "run") and !std.mem.eql(u8, command, "watch")) {
         zlog.err("Invalid command '{s}'. Expected 'run' or 'watch'", .{command});
         std.process.exit(1);
@@ -104,23 +99,18 @@ pub fn main() !void {
             const debounce_ns = 200_000_000; // 200ms
             var last_run_time: i128 = 0;
 
-            try flint_inst.startWatcherThread(t, allocator);
-
             while (true) {
                 if (utils.shouldExit()) break;
+                try flint.watchUntilUpdate(t.watcher.?);
 
-                std.Thread.sleep(10_000);
+                const now = std.time.nanoTimestamp();
+                if (now - last_run_time > debounce_ns) {
+                    killRunningProcess(&running_process);
 
-                if (flint_inst.file_changed.swap(false, .seq_cst)) {
-                    const now = std.time.nanoTimestamp();
-                    if (now - last_run_time > debounce_ns) {
-                        killRunningProcess(&running_process);
-
-                        runTaskAndDeps(allocator, t) catch {
-                            zlog.err("Task '{s}' failed", .{t.name});
-                        };
-                        last_run_time = now;
-                    }
+                    runTaskAndDeps(allocator, t) catch {
+                        zlog.err("Task '{s}' failed", .{t.name});
+                    };
+                    last_run_time = now;
                 }
             }
         }
@@ -133,7 +123,6 @@ pub fn main() !void {
 }
 
 const RunningProcess = struct {
-    mutex: std.Thread.Mutex = .{},
     child: ?*std.process.Child = null,
 };
 
@@ -153,14 +142,10 @@ fn runCommandInternal(allocator: std.mem.Allocator, cmd: []const u8, running_pro
 
     try child.spawn();
 
-    running_proc.mutex.lock();
     running_proc.child = &child;
-    running_proc.mutex.unlock();
 
     defer {
-        running_proc.mutex.lock();
         running_proc.child = null;
-        running_proc.mutex.unlock();
     }
 
     if (child.stdout) |stdout| {
@@ -188,12 +173,9 @@ fn runCommandInternal(allocator: std.mem.Allocator, cmd: []const u8, running_pro
 }
 
 fn killRunningProcess(running_proc: *RunningProcess) void {
-    running_proc.mutex.lock();
     if (running_proc.child) |child| {
-        // Try to kill the process
         _ = child.kill() catch {};
     }
-    running_proc.mutex.unlock();
 }
 
 fn runTaskAndDeps(allocator: std.mem.Allocator, task: *flint.Task) !void {
