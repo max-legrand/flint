@@ -11,10 +11,17 @@ Example `flint.zon` file:
         .{
             .name = "build",
             .cmd = "zig build --release=safe --summary all",
+            .watcher = .{
+                "src/*",
+            }
+            .deps = .{
+                "clean",
+            }
         },
-    },
-    .watcher = .{
-        "src/*",
+        .{
+            .name = "clean",
+            .cmd = "rm -rf zig-out",
+        }
     },
 }
 ```
