@@ -125,12 +125,13 @@ pub fn watchWithFswatch(allocator: std.mem.Allocator, paths: [][]const u8) !void
         const line = try reader.readUntilDelimiterOrEof(&buf, '\n');
         if (line == null) break;
 
-        if (std.mem.containsAtLeast(u8, line.?, 1, "IsDir")) {
-            continue;
+        if (std.mem.lastIndexOf(u8, line.?, " ")) |idx| {
+            const event = line.?[idx + 1 ..];
+            if (std.mem.eql(u8, event, "Created") or std.mem.eql(u8, event, "Updated") or std.mem.eql(u8, event, "Removed")) {
+                std.debug.print("fswatch: {s}\n", .{line.?});
+                break;
+            }
         }
-
-        std.debug.print("fswatch: {s}\n", .{line.?});
-        break;
     }
 
     _ = try child.kill();
