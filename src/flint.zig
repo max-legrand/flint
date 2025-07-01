@@ -41,7 +41,6 @@ pub fn initWatcher(allocator: std.mem.Allocator, globs: [][]const u8) !*Watcher 
     return try Watcher.init(allocator, globs);
 }
 
-/// --- Minimal, robust watcher ---
 pub const Watcher = struct {
     files: std.StringHashMap(i128), // abs path -> mtime
     globs: [][]const u8,
@@ -84,6 +83,58 @@ pub const Watcher = struct {
         self.allocator.free(self.globs);
     }
 };
+
+fn contains(list: std.ArrayList([]const u8), item: []const u8) bool {
+    for (list.items) |i| {
+        if (std.mem.eql(u8, i, item)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+pub fn watchUnilUpdateFswatch(watcher: *Watcher) !void {
+    zlog.info("Starting fswatch", .{});
+    var dirs = std.ArrayList([]const u8).init(watcher.allocator);
+    defer dirs.deinit();
+    var keys = watcher.files.keyIterator();
+    while (keys.next()) |key| {
+        const dir = std.fs.path.dirname(key.*) orelse continue;
+        if (contains(dirs, dir)) continue;
+        try dirs.append(dir);
+    }
+    try watchWithFswatch(watcher.allocator, dirs.items);
+}
+
+pub fn watchWithFswatch(allocator: std.mem.Allocator, paths: [][]const u8) !void {
+    var argv = std.ArrayList([]const u8).init(allocator);
+    try argv.append("fswatch");
+    try argv.append("-x");
+    for (paths) |path| {
+        try argv.append(path);
+    }
+
+    var child = std.process.Child.init(argv.items, allocator);
+    child.stdout_behavior = .Pipe;
+    try child.spawn();
+
+    var reader = child.stdout.?.reader();
+    var buf: [1024]u8 = undefined;
+
+    while (true) {
+        const line = try reader.readUntilDelimiterOrEof(&buf, '\n');
+        if (line == null) break;
+
+        if (std.mem.containsAtLeast(u8, line.?, 1, "IsDir")) {
+            continue;
+        }
+
+        std.debug.print("fswatch: {s}\n", .{line.?});
+        break;
+    }
+
+    _ = try child.kill();
+}
 
 pub fn watchUntilUpdate(watcher: *Watcher) !void {
     zlog.info("Starting polling watcher", .{});
@@ -137,8 +188,6 @@ pub fn watchUntilUpdate(watcher: *Watcher) !void {
     }
     return error.WatcherExited;
 }
-
-// --- Helper functions ---
 
 fn getAbsolutePath(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
     return try std.fs.realpathAlloc(allocator, path);
@@ -237,8 +286,6 @@ fn findFilesRecursive(
     }
     return files.toOwnedSlice();
 }
-
-// --- Topological sort and task parsing (unchanged) ---
 
 fn valueToString(val: std.json.Value) []const u8 {
     return val.string;

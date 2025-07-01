@@ -96,12 +96,14 @@ pub fn main() !void {
             runTaskAndDeps(allocator, t) catch {
                 zlog.err("Task '{s}' failed", .{t.name});
             };
-            const debounce_ns = 200_000_000; // 200ms
+            // const debounce_ns = 200_000_000; // 200ms
+            const debounce_ns = 100_000; // 200ms
             var last_run_time: i128 = 0;
 
             while (true) {
                 if (utils.shouldExit()) break;
-                flint.watchUntilUpdate(t.watcher.?) catch {
+                // flint.watchUntilUpdate(t.watcher.?) catch {
+                flint.watchUnilUpdateFswatch(t.watcher.?) catch {
                     // Error occurs when we hit the "shouldExit" condition
                     return;
                 };

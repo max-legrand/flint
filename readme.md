@@ -3,6 +3,12 @@
 Flint is a task runner and file watcher built with Zig. Users provide a `flint.zon` file
 which defines the tasks to run and the files to watch.
 
+## Dependencies
+
+flint currently depends on fswatch to handle file watching. This is the only dependency.
+
+## Usage
+
 Example `flint.zon` file:
 
 ```zig
