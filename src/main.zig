@@ -8,6 +8,8 @@ const major = 1;
 const minor = 0;
 const patch = 0;
 
+var watcher_ready = std.atomic.Value(bool).init(false);
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const gpa_allocator = gpa.allocator();
@@ -93,31 +95,34 @@ pub fn main() !void {
             try runTaskAndDeps(allocator, t);
         } else {
             zlog.info("Watching {d} files for changes", .{t.watcher.?.files.count()});
-            runTaskAndDeps(allocator, t) catch {
-                zlog.err("Task '{s}' failed", .{t.name});
-            };
+            // Spin up thread for watcher
+
+            var watcher_thread = try std.Thread.spawn(.{
+                .allocator = allocator,
+            }, watcherThread, .{t});
+
+            try runTaskAndDeps(allocator, t);
+
             // const debounce_ns = 200_000_000; // 200ms
             const debounce_ns = 100_000; // 200ms
             var last_run_time: i128 = 0;
-
             while (true) {
                 if (utils.shouldExit()) break;
-                // flint.watchUntilUpdate(t.watcher.?) catch {
-                flint.watchUnilUpdateFswatch(t.watcher.?) catch {
-                    // Error occurs when we hit the "shouldExit" condition
-                    return;
-                };
+                if (watcher_ready.load(.seq_cst)) {
+                    zlog.info("File change detected!", .{});
+                    const now = std.time.nanoTimestamp();
+                    if (now - last_run_time > debounce_ns) {
+                        killRunningProcess();
 
-                const now = std.time.nanoTimestamp();
-                if (now - last_run_time > debounce_ns) {
-                    killRunningProcess(&running_process);
-
-                    runTaskAndDeps(allocator, t) catch {
-                        zlog.err("Task '{s}' failed", .{t.name});
-                    };
-                    last_run_time = now;
+                        runTaskAndDeps(allocator, t) catch {
+                            zlog.err("Task '{s}' failed", .{t.name});
+                        };
+                        last_run_time = now;
+                        watcher_ready.store(false, .seq_cst);
+                    }
                 }
             }
+            watcher_thread.join();
         }
     } else {
         zlog.err("Task '{s}' not found", .{task});
@@ -129,11 +134,16 @@ pub fn main() !void {
 
 const RunningProcess = struct {
     child: ?*std.process.Child = null,
+    mutex: std.Thread.Mutex = .{},
 };
 
 var running_process = RunningProcess{};
 
-fn runCommandInternal(allocator: std.mem.Allocator, cmd: []const u8, running_proc: *RunningProcess) !void {
+fn runCommandInternal(
+    allocator: std.mem.Allocator,
+    cmd: []const u8,
+    output_behavior: std.process.Child.StdIo,
+) !void {
     zlog.info("Running command '{s}'", .{cmd});
 
     const args_slice = if (builtin.os.tag == .macos)
@@ -141,56 +151,84 @@ fn runCommandInternal(allocator: std.mem.Allocator, cmd: []const u8, running_pro
     else
         &[_][]const u8{ "sh", "-c", cmd };
 
-    var child = std.process.Child.init(args_slice, allocator);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe;
+    var child = try allocator.create(std.process.Child);
+    child.* = std.process.Child.init(args_slice, allocator);
+    child.stdout_behavior = output_behavior;
+    child.stderr_behavior = output_behavior;
 
     try child.spawn();
 
-    running_proc.child = &child;
-
-    defer {
-        running_proc.child = null;
-    }
-
-    if (child.stdout) |stdout| {
-        var buf: [1024]u8 = undefined;
-        while (true) {
-            const n = try stdout.read(&buf);
-            if (n == 0) break;
-            _ = try std.io.getStdOut().writeAll(buf[0..n]);
-        }
-    }
-
-    if (child.stderr) |stderr| {
-        var buf: [1024]u8 = undefined;
-        while (true) {
-            const n = try stderr.read(&buf);
-            if (n == 0) break;
-            _ = try std.io.getStdErr().writeAll(buf[0..n]);
-        }
-    }
-
-    const result = try child.wait();
-    if (result.Exited != 0) {
-        return error.CommandFailed;
-    }
+    running_process.mutex.lock();
+    running_process.child = child;
+    running_process.mutex.unlock();
 }
 
-fn killRunningProcess(running_proc: *RunningProcess) void {
-    if (running_proc.child) |child| {
+fn killRunningProcess() void {
+    running_process.mutex.lock();
+    if (running_process.child) |child| {
         _ = child.kill() catch {};
+        // Optionally, you can also wait and free here if you want to clean up
+        // _ = child.wait() catch {};
+        // allocator.destroy(child);
+        running_process.child = null;
     }
+    running_process.mutex.unlock();
 }
 
 fn runTaskAndDeps(allocator: std.mem.Allocator, task: *flint.Task) !void {
     if (task.deps_tasks.len == 0) {
-        try runCommandInternal(allocator, task.cmd orelse return, &running_process);
-        return;
+        try runCommandInternal(allocator, task.cmd orelse return, .Pipe);
     }
-    for (task.deps_tasks) |dep| {
+    for (task.deps_tasks, 0..) |dep, idx| {
         if (dep.cmd) |cmd| {
-            try runCommandInternal(allocator, cmd, &running_process);
+            if (idx != task.deps_tasks.len - 1) {
+                // Wait for dependency to finish before running the next one
+                try runCommandInternal(allocator, cmd, .Pipe);
+
+                running_process.mutex.lock();
+                if (running_process.child) |child| {
+                    zlog.debug("Waiting for dependency '{s}' to finish", .{dep.name});
+                    _ = try child.wait();
+                    if (child.stdout) |stdout| {
+                        var buf: [1024]u8 = undefined;
+                        while (true) {
+                            const n = try stdout.read(&buf);
+                            if (n == 0) break;
+                            _ = try std.io.getStdOut().writeAll(buf[0..n]);
+                        }
+                    }
+
+                    if (child.stderr) |stderr| {
+                        var buf: [1024]u8 = undefined;
+                        while (true) {
+                            const n = try stderr.read(&buf);
+                            if (n == 0) break;
+                            _ = try std.io.getStdErr().writeAll(buf[0..n]);
+                        }
+                    }
+                    running_process.child = null;
+                    zlog.debug("Dependency '{s}' finished", .{dep.name});
+                }
+                running_process.mutex.unlock();
+            } else {
+                try runCommandInternal(allocator, cmd, .Inherit);
+            }
         }
+    }
+}
+
+fn watcherThread(t: *flint.Task) !void {
+    zlog.info("Starting watcher thread", .{});
+    while (true) {
+        if (utils.shouldExit()) {
+            zlog.info("Exiting watcher thread", .{});
+            break;
+        }
+        // flint.watchUntilUpdate(t.watcher.?) catch {
+        flint.watchUnilUpdateFswatch(t.watcher.?) catch {
+            std.Thread.sleep(std.time.ns_per_s * 0.1);
+            continue;
+        };
+        watcher_ready.store(true, .seq_cst);
     }
 }

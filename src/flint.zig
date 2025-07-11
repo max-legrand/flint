@@ -97,16 +97,29 @@ pub fn watchUnilUpdateFswatch(watcher: *Watcher) !void {
     zlog.info("Starting fswatch", .{});
     var dirs = std.ArrayList([]const u8).init(watcher.allocator);
     defer dirs.deinit();
-    var keys = watcher.files.keyIterator();
-    while (keys.next()) |key| {
-        const dir = std.fs.path.dirname(key.*) orelse continue;
-        if (contains(dirs, dir)) continue;
-        try dirs.append(dir);
+
+    // Always watch the directories from the globs
+    for (watcher.globs) |glob| {
+        if (std.mem.lastIndexOf(u8, glob, "/")) |slash| {
+            const dir = glob[0..slash];
+            if (!contains(dirs, dir)) {
+                try dirs.append(dir);
+            }
+        } else {
+            if (!contains(dirs, ".")) {
+                try dirs.append(".");
+            }
+        }
     }
-    try watchWithFswatch(watcher.allocator, dirs.items);
+
+    try watchWithFswatch(watcher.allocator, dirs.items, watcher.globs);
 }
 
-pub fn watchWithFswatch(allocator: std.mem.Allocator, paths: [][]const u8) !void {
+pub fn watchWithFswatch(
+    allocator: std.mem.Allocator,
+    paths: [][]const u8,
+    globs: [][]const u8,
+) !void {
     var argv = std.ArrayList([]const u8).init(allocator);
     try argv.append("fswatch");
     try argv.append("-x");
@@ -121,20 +134,66 @@ pub fn watchWithFswatch(allocator: std.mem.Allocator, paths: [][]const u8) !void
     var reader = child.stdout.?.reader();
     var buf: [1024]u8 = undefined;
 
+    // Get the cwd once
+    const cwd = try std.fs.cwd().realpathAlloc(allocator, ".");
+
     while (true) {
         const line = try reader.readUntilDelimiterOrEof(&buf, '\n');
         if (line == null) break;
 
         if (std.mem.lastIndexOf(u8, line.?, " ")) |idx| {
+            const file_path = line.?[0..idx];
             const event = line.?[idx + 1 ..];
             if (std.mem.eql(u8, event, "Created") or std.mem.eql(u8, event, "Updated") or std.mem.eql(u8, event, "Removed")) {
-                std.debug.print("fswatch: {s}\n", .{line.?});
-                break;
+                if (std.mem.startsWith(u8, file_path, cwd) and file_path.len > cwd.len) {
+                    // +1 to skip the trailing slash
+                    const rel_path = file_path[cwd.len + 1 ..];
+                    for (globs) |glob| {
+                        if (matchGlob(glob, rel_path)) {
+                            zlog.info("Matched glob: {s} with file: {s}", .{ glob, rel_path });
+                            _ = try child.kill();
+                            return;
+                        }
+                    }
+                }
             }
         }
     }
 
     _ = try child.kill();
+}
+
+fn matchGlob(glob: []const u8, path: []const u8) bool {
+    var gi: usize = 0;
+    var pi: usize = 0;
+    while (gi < glob.len and pi < path.len) {
+        switch (glob[gi]) {
+            '*' => {
+                // Collapse multiple '*' in a row
+                while (gi + 1 < glob.len and glob[gi + 1] == '*') gi += 1;
+                if (gi + 1 == glob.len) return true; // trailing * matches everything
+                gi += 1;
+                while (pi < path.len) {
+                    if (matchGlob(glob[gi..], path[pi..])) return true;
+                    pi += 1;
+                }
+                return false;
+            },
+            '?' => {
+                if (path[pi] == '/') return false;
+                gi += 1;
+                pi += 1;
+            },
+            else => {
+                if (glob[gi] != path[pi]) return false;
+                gi += 1;
+                pi += 1;
+            },
+        }
+    }
+    // Skip trailing '*' in glob
+    while (gi < glob.len and glob[gi] == '*') gi += 1;
+    return gi == glob.len and pi == path.len;
 }
 
 pub fn watchUntilUpdate(watcher: *Watcher) !void {
