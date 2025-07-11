@@ -189,7 +189,7 @@ fn runTaskAndDeps(allocator: std.mem.Allocator, task: *flint.Task) !void {
                 running_process.mutex.lock();
                 if (running_process.child) |child| {
                     zlog.debug("Waiting for dependency '{s}' to finish", .{dep.name});
-                    _ = try child.wait();
+                    const term = try child.wait();
                     if (child.stdout) |stdout| {
                         var buf: [1024]u8 = undefined;
                         while (true) {
@@ -206,6 +206,11 @@ fn runTaskAndDeps(allocator: std.mem.Allocator, task: *flint.Task) !void {
                             if (n == 0) break;
                             _ = try std.io.getStdErr().writeAll(buf[0..n]);
                         }
+                    }
+                    if (term.Exited != 0) {
+                        // Dependency failed
+                        zlog.err("Dependency '{s}' failed with exit code {d}", .{ dep.name, term.Exited });
+                        break;
                     }
                     running_process.child = null;
                     zlog.debug("Dependency '{s}' finished", .{dep.name});
