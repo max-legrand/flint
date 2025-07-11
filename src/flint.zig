@@ -1,6 +1,8 @@
 const std = @import("std");
 const zlog = @import("zlog");
 const utils = @import("utils.zig");
+const posix = std.posix;
+const builtin = @import("builtin");
 
 pub const Task = struct {
     name: []const u8,
@@ -115,6 +117,13 @@ pub fn watchUnilUpdateFswatch(watcher: *Watcher) !void {
     try watchWithFswatch(watcher.allocator, dirs.items, watcher.globs);
 }
 
+pub const WatchProc = struct {
+    mutex: std.Thread.Mutex = .{},
+    child: ?*std.process.Child = null,
+};
+
+pub var FSWatcher = WatchProc{};
+
 pub fn watchWithFswatch(
     allocator: std.mem.Allocator,
     paths: [][]const u8,
@@ -127,31 +136,44 @@ pub fn watchWithFswatch(
         try argv.append(path);
     }
 
+    FSWatcher.mutex.lock();
     var child = std.process.Child.init(argv.items, allocator);
     child.stdout_behavior = .Pipe;
     try child.spawn();
+    FSWatcher.child = &child;
+    FSWatcher.mutex.unlock();
 
-    var reader = child.stdout.?.reader();
-    var buf: [1024]u8 = undefined;
+    const fd = child.stdout.?.handle;
+    try setNonBlocking(fd);
 
-    // Get the cwd once
     const cwd = try std.fs.cwd().realpathAlloc(allocator, ".");
 
+    var buf: [1024]u8 = undefined;
     while (true) {
-        const line = try reader.readUntilDelimiterOrEof(&buf, '\n');
-        if (line == null) break;
-
-        if (std.mem.lastIndexOf(u8, line.?, " ")) |idx| {
-            const file_path = line.?[0..idx];
-            const event = line.?[idx + 1 ..];
+        if (utils.shouldExit()) {
+            _ = child.kill() catch {};
+            break;
+        }
+        // Non-blocking read
+        const n = posix.read(fd, &buf) catch |err| switch (err) {
+            error.WouldBlock => {
+                std.Thread.sleep(10 * std.time.ns_per_ms);
+                continue;
+            },
+            else => return err,
+        };
+        if (n == 0) break; // EOF
+        const line = buf[0..n];
+        if (std.mem.lastIndexOf(u8, line, " ")) |idx| {
+            const file_path = line[0..idx];
+            const event = line[idx + 1 ..];
             if (std.mem.eql(u8, event, "Created") or std.mem.eql(u8, event, "Updated") or std.mem.eql(u8, event, "Removed")) {
                 if (std.mem.startsWith(u8, file_path, cwd) and file_path.len > cwd.len) {
-                    // +1 to skip the trailing slash
                     const rel_path = file_path[cwd.len + 1 ..];
                     for (globs) |glob| {
                         if (matchGlob(glob, rel_path)) {
                             zlog.info("Matched glob: {s} with file: {s}", .{ glob, rel_path });
-                            _ = try child.kill();
+                            _ = child.kill() catch {};
                             return;
                         }
                     }
@@ -159,8 +181,7 @@ pub fn watchWithFswatch(
             }
         }
     }
-
-    _ = try child.kill();
+    _ = child.kill() catch {};
 }
 
 fn matchGlob(glob: []const u8, path: []const u8) bool {
@@ -441,4 +462,20 @@ pub fn parseTasks(
     };
 
     return flint;
+}
+
+fn setNonBlocking(fd: posix.fd_t) !void {
+    const flags = try posix.fcntl(fd, posix.F.GETFL, 0);
+    const O_NONBLOCK = 0o0004000;
+    switch (builtin.os.tag) {
+        .linux => {
+            _ = try posix.fcntl(fd, posix.F.SETFL, flags | O_NONBLOCK);
+        },
+        .macos => {
+            _ = try posix.fcntl(fd, posix.F.SETFL, flags | O_NONBLOCK);
+        },
+        else => {
+            @panic("Unsupported OS");
+        },
+    }
 }

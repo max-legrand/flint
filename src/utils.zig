@@ -20,7 +20,7 @@ pub fn setAbortSignalHandler() !void {
         const internal_handler = struct {
             fn internalHandler(sig: c_int) callconv(.c) void {
                 if (sig == std.posix.SIG.INT) {
-                    std.debug.print("Shutting down...\n", .{});
+                    // std.debug.print("Shutting down...\n", .{});
                     shouldExitValue.store(true, .seq_cst);
                 }
             }

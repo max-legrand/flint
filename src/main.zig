@@ -122,8 +122,10 @@ pub fn main() !void {
                     }
                 }
             }
-            watcher_thread.join();
+            zlog.info("Shutting down...", .{});
             killRunningProcess();
+            zlog.info("Running process killed", .{});
+            watcher_thread = undefined;
         }
     } else {
         zlog.err("Task '{s}' not found", .{task});
@@ -165,15 +167,19 @@ fn runCommandInternal(
 }
 
 fn killRunningProcess() void {
+    zlog.info("Locking running process mutex", .{});
     running_process.mutex.lock();
     if (running_process.child) |child| {
+        zlog.info("Killing running process", .{});
         _ = child.kill() catch {};
+        zlog.info("Process killed", .{});
         // Optionally, you can also wait and free here if you want to clean up
         // _ = child.wait() catch {};
         // allocator.destroy(child);
         running_process.child = null;
     }
     running_process.mutex.unlock();
+    zlog.info("Running process mutex unlocked", .{});
 }
 
 fn runTaskAndDeps(allocator: std.mem.Allocator, task: *flint.Task) !void {
@@ -184,38 +190,39 @@ fn runTaskAndDeps(allocator: std.mem.Allocator, task: *flint.Task) !void {
         if (dep.cmd) |cmd| {
             if (idx != task.deps_tasks.len - 1) {
                 // Wait for dependency to finish before running the next one
-                try runCommandInternal(allocator, cmd, .Pipe);
+                // try runCommandInternal(allocator, cmd, .Pipe);
+                try runCommandInternal(allocator, cmd, .Inherit);
 
-                running_process.mutex.lock();
                 if (running_process.child) |child| {
                     zlog.debug("Waiting for dependency '{s}' to finish", .{dep.name});
+                    // if (child.stdout) |stdout| {
+                    //     var buf: [1024]u8 = undefined;
+                    //     while (true) {
+                    //         const n = try stdout.read(&buf);
+                    //         if (n == 0) break;
+                    //         _ = try std.io.getStdOut().writeAll(buf[0..n]);
+                    //     }
+                    // }
+                    //
+                    // if (child.stderr) |stderr| {
+                    //     var buf: [1024]u8 = undefined;
+                    //     while (true) {
+                    //         const n = try stderr.read(&buf);
+                    //         if (n == 0) break;
+                    //         _ = try std.io.getStdErr().writeAll(buf[0..n]);
+                    //     }
+                    // }
                     const term = try child.wait();
-                    if (child.stdout) |stdout| {
-                        var buf: [1024]u8 = undefined;
-                        while (true) {
-                            const n = try stdout.read(&buf);
-                            if (n == 0) break;
-                            _ = try std.io.getStdOut().writeAll(buf[0..n]);
-                        }
-                    }
-
-                    if (child.stderr) |stderr| {
-                        var buf: [1024]u8 = undefined;
-                        while (true) {
-                            const n = try stderr.read(&buf);
-                            if (n == 0) break;
-                            _ = try std.io.getStdErr().writeAll(buf[0..n]);
-                        }
-                    }
                     if (term.Exited != 0) {
                         // Dependency failed
                         zlog.err("Dependency '{s}' failed with exit code {d}", .{ dep.name, term.Exited });
-                        break;
+                        return;
                     }
+                    running_process.mutex.lock();
                     running_process.child = null;
+                    running_process.mutex.unlock();
                     zlog.debug("Dependency '{s}' finished", .{dep.name});
                 }
-                running_process.mutex.unlock();
             } else {
                 try runCommandInternal(allocator, cmd, .Inherit);
             }
@@ -227,14 +234,17 @@ fn watcherThread(t: *flint.Task) !void {
     zlog.info("Starting watcher thread", .{});
     while (true) {
         if (utils.shouldExit()) {
-            zlog.info("Exiting watcher thread", .{});
+            zlog.info("Killing watcher thread", .{});
             break;
         }
         // flint.watchUntilUpdate(t.watcher.?) catch {
-        flint.watchUnilUpdateFswatch(t.watcher.?) catch {
+        flint.watchUnilUpdateFswatch(t.watcher.?) catch |e| {
+            zlog.err("Watcher thread failed: {any}", .{e});
             std.Thread.sleep(std.time.ns_per_s * 0.1);
             continue;
         };
         watcher_ready.store(true, .seq_cst);
     }
+
+    zlog.info("Returning from watcher thread", .{});
 }
