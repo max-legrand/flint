@@ -123,6 +123,7 @@ pub fn main() !void {
                 }
             }
             watcher_thread.join();
+            killRunningProcess();
         }
     } else {
         zlog.err("Task '{s}' not found", .{task});
