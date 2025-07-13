@@ -92,7 +92,7 @@ pub fn main() !void {
             }
         }
         if (std.mem.eql(u8, command, "run")) {
-            try runTaskAndDeps(allocator, t);
+            try runTaskAndDeps(t);
         } else {
             zlog.info("Watching {d} files for changes", .{t.watcher.?.files.count()});
             // Spin up thread for watcher
@@ -101,7 +101,10 @@ pub fn main() !void {
                 .allocator = allocator,
             }, watcherThread, .{t});
 
-            try runTaskAndDeps(allocator, t);
+            var run_thread = std.Thread.spawn(.{ .allocator = allocator }, runTaskAndDeps, .{t}) catch |e| {
+                zlog.err("Failed to spawn watcher thread: {any}", .{e});
+                std.process.exit(1);
+            };
 
             // const debounce_ns = 200_000_000; // 200ms
             const debounce_ns = 100_000; // 200ms
@@ -113,9 +116,11 @@ pub fn main() !void {
                     const now = std.time.nanoTimestamp();
                     if (now - last_run_time > debounce_ns) {
                         killRunningProcess();
+                        run_thread.join();
 
-                        runTaskAndDeps(allocator, t) catch {
-                            zlog.err("Task '{s}' failed", .{t.name});
+                        run_thread = std.Thread.spawn(.{ .allocator = allocator }, runTaskAndDeps, .{t}) catch |e| {
+                            zlog.err("Failed to spawn watcher thread: {any}", .{e});
+                            std.process.exit(1);
                         };
                         last_run_time = now;
                         watcher_ready.store(false, .seq_cst);
@@ -126,6 +131,7 @@ pub fn main() !void {
             killRunningProcess();
             zlog.info("Running process killed", .{});
             watcher_thread = undefined;
+            run_thread.join();
         }
     } else {
         zlog.err("Task '{s}' not found", .{task});
@@ -162,6 +168,7 @@ fn runCommandInternal(
     try child.spawn();
 
     running_process.mutex.lock();
+    zlog.debug("Set child process", .{});
     running_process.child = child;
     running_process.mutex.unlock();
 }
@@ -182,9 +189,22 @@ fn killRunningProcess() void {
     zlog.info("Running process mutex unlocked", .{});
 }
 
-fn runTaskAndDeps(allocator: std.mem.Allocator, task: *flint.Task) !void {
+fn runTaskAndDeps(task: *flint.Task) !void {
+    const allocator = std.heap.page_allocator;
     if (task.deps_tasks.len == 0) {
-        try runCommandInternal(allocator, task.cmd orelse return, .Pipe);
+        try runCommandInternal(allocator, task.cmd orelse return, .Inherit);
+        if (running_process.child) |child| {
+            const term = try child.wait();
+            if (term.Exited != 0) {
+                // Dependency failed
+                zlog.err("Dependency '{s}' failed with exit code {d}", .{ task.name, term.Exited });
+                return;
+            }
+            running_process.mutex.lock();
+            running_process.child = null;
+            running_process.mutex.unlock();
+            zlog.info("Task '{s}' finished successfully", .{task.name});
+        }
     }
     for (task.deps_tasks, 0..) |dep, idx| {
         if (dep.cmd) |cmd| {

@@ -99,16 +99,11 @@ pub fn watchUnilUpdateFswatch(watcher: *Watcher) !void {
     defer dirs.deinit();
 
     // Always watch the directories from the globs
-    for (watcher.globs) |glob| {
-        if (std.mem.lastIndexOf(u8, glob, "/")) |slash| {
-            const dir = glob[0..slash];
-            if (!contains(dirs, dir)) {
-                try dirs.append(dir);
-            }
-        } else {
-            if (!contains(dirs, ".")) {
-                try dirs.append(".");
-            }
+    var files = watcher.files.keyIterator();
+    while (files.next()) |file| {
+        const dir = std.fs.path.dirname(file.*);
+        if (dir) |d| {
+            try dirs.append(d);
         }
     }
 
@@ -154,10 +149,12 @@ pub fn watchWithFswatch(
         }
         const line = try reader.readUntilDelimiterOrEof(&buf, '\n');
         if (line == null) break;
+        zlog.debug("Line: {s}", .{line.?});
 
         if (std.mem.lastIndexOf(u8, line.?, " ")) |idx| {
             const file_path = line.?[0..idx];
             const event = line.?[idx + 1 ..];
+            zlog.debug("file: {s}, event: {s}", .{ file_path, event });
             if (std.mem.eql(u8, event, "Created") or std.mem.eql(u8, event, "Updated") or std.mem.eql(u8, event, "Removed")) {
                 if (std.mem.startsWith(u8, file_path, cwd) and file_path.len > cwd.len) {
                     // +1 to skip the trailing slash
