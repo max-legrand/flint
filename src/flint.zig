@@ -130,10 +130,16 @@ pub fn watchWithFswatch(
     }
 
     FSWatcher.mutex.lock();
-    var child = std.process.Child.init(argv.items, allocator);
+    if (FSWatcher.child) |old| {
+        _ = old.kill() catch {};
+        _ = old.wait() catch {};
+        allocator.destroy(old);
+    }
+    var child = try allocator.create(std.process.Child);
+    child.* = std.process.Child.init(argv.items, allocator);
     child.stdout_behavior = .Pipe;
     try child.spawn();
-    FSWatcher.child = &child;
+    FSWatcher.child = child;
     FSWatcher.mutex.unlock();
 
     var reader = child.stdout.?.reader();
@@ -171,7 +177,12 @@ pub fn watchWithFswatch(
         }
     }
 
+    FSWatcher.mutex.lock();
     _ = try child.kill();
+    _ = child.wait() catch {};
+    allocator.destroy(child);
+    FSWatcher.child = null;
+    FSWatcher.mutex.unlock();
 }
 
 fn matchGlob(glob: []const u8, path: []const u8) bool {
