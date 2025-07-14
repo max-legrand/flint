@@ -8,8 +8,6 @@ const major = 1;
 const minor = 0;
 const patch = 0;
 
-var watcher_ready = std.atomic.Value(bool).init(false);
-
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const gpa_allocator = gpa.allocator();
@@ -111,27 +109,29 @@ pub fn main() !void {
             var last_run_time: i128 = 0;
             while (true) {
                 if (utils.shouldExit()) break;
-                if (watcher_ready.load(.seq_cst)) {
+                if (flint.watcher_ready.load(.seq_cst)) {
                     zlog.info("File change detected!", .{});
                     const now = std.time.nanoTimestamp();
                     if (now - last_run_time > debounce_ns) {
-                        killRunningProcess();
-                        run_thread.join();
+                        const killed = killRunningProcess();
+                        if (killed) {
+                            run_thread.detach();
+                        }
 
                         run_thread = std.Thread.spawn(.{ .allocator = allocator }, runTaskAndDeps, .{t}) catch |e| {
                             zlog.err("Failed to spawn watcher thread: {any}", .{e});
                             std.process.exit(1);
                         };
                         last_run_time = now;
-                        watcher_ready.store(false, .seq_cst);
+                        flint.watcher_ready.store(false, .seq_cst);
                     }
                 }
             }
             zlog.info("Shutting down...", .{});
-            killRunningProcess();
+            _ = killRunningProcess();
             zlog.info("Running process killed", .{});
             watcher_thread = undefined;
-            run_thread.join();
+            run_thread.detach();
         }
     } else {
         zlog.err("Task '{s}' not found", .{task});
@@ -173,7 +173,8 @@ fn runCommandInternal(
     running_process.mutex.unlock();
 }
 
-fn killRunningProcess() void {
+fn killRunningProcess() bool {
+    var result = false;
     zlog.info("Locking running process mutex", .{});
     running_process.mutex.lock();
     if (running_process.child) |child| {
@@ -184,9 +185,11 @@ fn killRunningProcess() void {
         // _ = child.wait() catch {};
         // allocator.destroy(child);
         running_process.child = null;
+        result = true;
     }
     running_process.mutex.unlock();
     zlog.info("Running process mutex unlocked", .{});
+    return result;
 }
 
 fn runTaskAndDeps(task: *flint.Task) !void {
@@ -263,7 +266,7 @@ fn watcherThread(t: *flint.Task) !void {
             std.Thread.sleep(std.time.ns_per_s * 0.1);
             continue;
         };
-        watcher_ready.store(true, .seq_cst);
+        flint.watcher_ready.store(true, .seq_cst);
     }
 
     zlog.info("Returning from watcher thread", .{});

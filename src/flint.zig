@@ -2,6 +2,8 @@ const std = @import("std");
 const zlog = @import("zlog");
 const utils = @import("utils.zig");
 
+pub var watcher_ready = std.atomic.Value(bool).init(false);
+
 pub const Task = struct {
     name: []const u8,
     cmd: ?[]const u8,
@@ -167,9 +169,8 @@ pub fn watchWithFswatch(
                     const rel_path = file_path[cwd.len + 1 ..];
                     for (globs) |glob| {
                         if (matchGlob(glob, rel_path)) {
-                            zlog.info("Matched glob: {s} with file: {s}", .{ glob, rel_path });
-                            _ = try child.kill();
-                            return;
+                            watcher_ready.store(true, .seq_cst);
+                            continue;
                         }
                     }
                 }
