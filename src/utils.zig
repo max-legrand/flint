@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const watcher = @import("watcher.zig");
 
 pub var shouldExitValue = std.atomic.Value(bool).init(false);
 
@@ -9,6 +10,9 @@ pub fn setAbortSignalHandler() !void {
             fn handler_routine(dwCtrlType: std.os.windows.DWORD) callconv(std.os.windows.WINAPI) void {
                 if (dwCtrlType == std.os.windows.CTRL_C_EVENT) {
                     shouldExitValue.store(true, .seq_cst);
+                    if (watcher.proc) |p| {
+                        _ = p.kill() catch {};
+                    }
                     return std.os.windows.TRUE;
                 } else {
                     return std.os.windows.FALSE;
@@ -22,6 +26,9 @@ pub fn setAbortSignalHandler() !void {
                 if (sig == std.posix.SIG.INT) {
                     // std.debug.print("Shutting down...\n", .{});
                     shouldExitValue.store(true, .seq_cst);
+                    if (watcher.proc) |p| {
+                        _ = p.kill() catch {};
+                    }
                 }
             }
         }.internalHandler;

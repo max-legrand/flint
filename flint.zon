@@ -1,22 +1,21 @@
 .{
-    .tasks = .{ .{
-        .name = "remove",
-        .cmd = "rm ~/bin/flint",
-        .deps = .{"mkdir"},
-    }, .{
-        .name = "mkdir",
-        .cmd = "mkdir -p ~/bin",
-    }, .{
-        .name = "build",
-        .cmd = "zig build --release=safe -fincremental",
-        .watcher = .{"**/*.zig"},
-    }, .{
-        .name = "install",
-        .cmd = "cp ./zig-out/bin/flint ~/bin/flint",
-        .deps = .{ "mkdir", "remove", "build" },
-    }, .{
-        .name = "test",
-        .cmd = "echo \"running\"",
-        .watcher = .{ "**/*.zig", "**/*.txt" },
-    } },
+    .tasks = .{
+        .{
+            .name = "test",
+            .cmd = "cat flint.zon",
+            .watcher = .{ "**/*.zig", "**/*.txt" },
+            .deps = .{"dep"},
+        },
+        .{
+            .name = "dep",
+            .cmd = "echo running dependency",
+        },
+        .{
+            .name = "long-run",
+            .cmd = "python3 -m http.server 8000",
+            .deps = .{"dep"},
+            .watcher = .{"**/*.zig"},
+            .keep_alive = true,
+        },
+    },
 }
