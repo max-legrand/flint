@@ -113,9 +113,21 @@ pub fn main() !void {
                 if (config.verbose) {
                     zlog.debug("Running task in keep-alive mode", .{});
                 }
-                main_task = try runTaskAsync(allocator, flint, &task.?);
+                main_task = runTaskAsync(allocator, flint, &task.?) catch |err| switch (err) {
+                    error.CommandFailed => null,
+                    else => {
+                        return err;
+                    },
+                };
             } else {
-                try runTaskAndDeps(allocator, flint, &task.?);
+                runTaskAndDeps(allocator, flint, &task.?) catch |err| {
+                    switch (err) {
+                        error.CommandFailed => {},
+                        else => {
+                            return err;
+                        },
+                    }
+                };
             }
 
             while (!utils.shouldExit()) {
@@ -135,9 +147,19 @@ pub fn main() !void {
                         last_run_time = now;
                         watcher.watcher_ready.store(false, .seq_cst);
                         if (task.?.keep_alive) {
-                            main_task = try runTaskAsync(allocator, flint, &task.?);
+                            main_task = runTaskAsync(allocator, flint, &task.?) catch |err| switch (err) {
+                                error.CommandFailed => null,
+                                else => {
+                                    return err;
+                                },
+                            };
                         } else {
-                            try runTaskAndDeps(allocator, flint, &task.?);
+                            runTaskAndDeps(allocator, flint, &task.?) catch |err| switch (err) {
+                                error.CommandFailed => {},
+                                else => {
+                                    return err;
+                                },
+                            };
                         }
                     }
                 }
@@ -160,7 +182,9 @@ fn runTaskAsync(allocator: std.mem.Allocator, flint: tasks.Flint, task: *tasks.T
         for (deps) |dep| {
             const dep_task = flint.tasks_map.get(dep) orelse continue;
             zlog.info("Running dependency {s}", .{dep});
-            try runTaskAndDeps(allocator, flint, dep_task);
+            runTaskAndDeps(allocator, flint, dep_task) catch |err| {
+                return err;
+            };
             zlog.info("Dependency {s} finished", .{dep});
         }
     }
@@ -196,6 +220,8 @@ fn runTaskAndDeps(allocator: std.mem.Allocator, flint: tasks.Flint, task: *tasks
     }
 
     zlog.info("Running command: {s}", .{task.cmd});
-    try cmd.executeCommandSync(allocator, args.items);
+    cmd.executeCommandSync(allocator, args.items) catch |err| {
+        return err;
+    };
     zlog.info("Command finished", .{});
 }
