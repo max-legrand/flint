@@ -34,7 +34,7 @@ pub fn setAbortSignalHandler() !void {
         }.internalHandler;
         const act = std.posix.Sigaction{
             .handler = .{ .handler = internal_handler },
-            .mask = std.posix.sigemptyset(),
+            .mask = std.posix.empty_sigset,
             .flags = 0,
         };
         std.posix.sigaction(std.posix.SIG.INT, &act, null);
