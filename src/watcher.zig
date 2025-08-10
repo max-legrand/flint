@@ -98,15 +98,22 @@ pub fn spawnWatcher(task: tasks.Task, skip_gitignore: bool) !void {
         };
         if (line == null) break;
 
-        if (std.mem.lastIndexOf(u8, line.?, " ")) |idx| {
+        if (std.mem.indexOf(u8, line.?, " ")) |idx| {
             const file_path = line.?[0..idx];
-            const event = line.?[idx + 1 ..];
+            const events = line.?[idx + 1 ..];
+            var event_set = std.StringHashMap(void).init(allocator);
+            defer event_set.deinit();
 
-            if (config.verbose) {
-                zlog.debug("file: {s}, event: {s}", .{ file_path, event });
+            var event_iter = std.mem.splitScalar(u8, events, ' ');
+            while (event_iter.next()) |event| {
+                try event_set.put(event, {});
             }
 
-            if (std.mem.eql(u8, event, "Created") or std.mem.eql(u8, event, "Updated") or std.mem.eql(u8, event, "Removed")) {
+            if (config.verbose) {
+                zlog.debug("line: {s}", .{line.?});
+            }
+
+            if (event_set.contains("Created") or event_set.contains("Updated") or event_set.contains("Removed")) {
                 if (std.mem.startsWith(u8, file_path, cwd_path) and file_path.len > cwd_path.len) {
                     // +1 to skip the trailing slash
                     const rel_path = file_path[cwd_path.len + 1 ..];
