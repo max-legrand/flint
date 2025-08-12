@@ -166,21 +166,50 @@ fn walkAndMatch(
     }
 }
 
-// Your matchGlob function as before
+// Enhanced matchGlob function with ** support for recursive directory matching
 fn matchGlob(glob: []const u8, path: []const u8) bool {
     var gi: usize = 0;
     var pi: usize = 0;
     while (gi < glob.len and pi < path.len) {
         switch (glob[gi]) {
             '*' => {
-                while (gi + 1 < glob.len and glob[gi + 1] == '*') gi += 1;
-                if (gi + 1 == glob.len) return true;
-                gi += 1;
-                while (pi < path.len) {
-                    if (matchGlob(glob[gi..], path[pi..])) return true;
-                    pi += 1;
+                // Check if this is a ** pattern
+                if (gi + 1 < glob.len and glob[gi + 1] == '*') {
+                    // Handle ** pattern - matches zero or more directories
+                    gi += 2; // Skip both *
+
+                    // Skip any trailing slashes after **
+                    while (gi < glob.len and glob[gi] == '/') gi += 1;
+
+                    // If ** is at the end of the glob, it matches everything
+                    if (gi == glob.len) return true;
+
+                    // Try matching the rest of the pattern at every position in the path
+                    while (pi <= path.len) {
+                        if (matchGlob(glob[gi..], path[pi..])) return true;
+
+                        // Move to next character, or next directory boundary
+                        if (pi < path.len) {
+                            pi += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    return false;
+                } else {
+                    // Single * - matches any sequence except directory separators
+                    if (gi + 1 == glob.len) {
+                        // * at end matches rest of current path segment
+                        while (pi < path.len and path[pi] != '/') pi += 1;
+                        return pi == path.len;
+                    }
+                    gi += 1;
+                    while (pi < path.len and path[pi] != '/') {
+                        if (matchGlob(glob[gi..], path[pi..])) return true;
+                        pi += 1;
+                    }
+                    return false;
                 }
-                return false;
             },
             '?' => {
                 if (path[pi] == '/') return false;
@@ -194,7 +223,22 @@ fn matchGlob(glob: []const u8, path: []const u8) bool {
             },
         }
     }
-    while (gi < glob.len and glob[gi] == '*') gi += 1;
+
+    // Handle trailing * or ** in glob
+    while (gi < glob.len) {
+        if (glob[gi] == '*') {
+            if (gi + 1 < glob.len and glob[gi + 1] == '*') {
+                // Trailing ** matches everything
+                return true;
+            } else {
+                // Trailing * matches if we're at end of path or at a directory boundary
+                gi += 1;
+            }
+        } else {
+            break;
+        }
+    }
+
     return gi == glob.len and pi == path.len;
 }
 
