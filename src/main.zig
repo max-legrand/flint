@@ -198,7 +198,7 @@ fn runTaskAsync(allocator: std.mem.Allocator, flint: tasks.Flint, task: *tasks.T
     }
 
     zlog.info("Running command: {s}", .{task.cmd});
-    return try cmd.executeCommandAsync(allocator, args.items);
+    return try cmd.executeCommandAsync(allocator, args.items, task.cwd);
 }
 
 fn runTaskAndDeps(allocator: std.mem.Allocator, flint: tasks.Flint, task: *tasks.Task) !void {
@@ -220,7 +220,7 @@ fn runTaskAndDeps(allocator: std.mem.Allocator, flint: tasks.Flint, task: *tasks
     }
 
     zlog.info("Running command: {s}", .{task.cmd});
-    cmd.executeCommandSync(allocator, args.items) catch |err| {
+    cmd.executeCommandSync(allocator, args.items, task.cwd) catch |err| {
         return err;
     };
     zlog.info("Command finished", .{});

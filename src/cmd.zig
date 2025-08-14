@@ -2,8 +2,11 @@ const std = @import("std");
 const string = []const u8;
 
 // Spawn a child process and return a handle to it.
-pub fn executeCommandAsync(allocator: std.mem.Allocator, args: []string) !std.process.Child {
+pub fn executeCommandAsync(allocator: std.mem.Allocator, args: []string, cwd: ?string) !std.process.Child {
     var child = std.process.Child.init(args, allocator);
+    if (cwd) |dir| {
+        child.cwd = dir;
+    }
     child.stdout_behavior = .Inherit;
     child.stderr_behavior = .Inherit;
     try child.spawn();
@@ -11,8 +14,8 @@ pub fn executeCommandAsync(allocator: std.mem.Allocator, args: []string) !std.pr
 }
 
 // Spawn a child process and wait for it to complete.
-pub fn executeCommandSync(allocator: std.mem.Allocator, args: []string) !void {
-    var child = try executeCommandAsync(allocator, args);
+pub fn executeCommandSync(allocator: std.mem.Allocator, args: []string, cwd: ?string) !void {
+    var child = try executeCommandAsync(allocator, args, cwd);
     const result = try child.wait();
     switch (result) {
         .Exited => |code| {
