@@ -25,7 +25,7 @@ pub fn spawnWatcher(task: tasks.Task, skip_gitignore: bool) !void {
     const allocator = arena.allocator();
 
     if (skip_gitignore) {
-        gitignore_paths = std.ArrayList(string).init(allocator);
+        gitignore_paths = try std.ArrayList(string).initCapacity(allocator, 64);
     } else {
         gitignore_paths = try parseGitignore(allocator, ".gitignore");
         if (config.verbose) {
@@ -34,7 +34,7 @@ pub fn spawnWatcher(task: tasks.Task, skip_gitignore: bool) !void {
             }
         }
     }
-    defer gitignore_paths.deinit();
+    defer gitignore_paths.deinit(allocator);
 
     var dirs = Set.init(allocator);
     defer dirs.deinit();
@@ -68,17 +68,17 @@ pub fn spawnWatcher(task: tasks.Task, skip_gitignore: bool) !void {
 
     zlog.debug("Watching {d} directories", .{dirs.count()});
 
-    var argv = std.ArrayList([]const u8).init(allocator);
-    defer argv.deinit();
+    var argv = try std.ArrayList([]const u8).initCapacity(allocator, 64);
+    defer argv.deinit(allocator);
 
-    try argv.append("fswatch");
-    try argv.append("-x");
+    try argv.append(allocator, "fswatch");
+    try argv.append(allocator, "-x");
     var iter = dirs.keyIterator();
     while (iter.next()) |dir| {
         if (config.verbose) {
             zlog.debug("  - {s}", .{dir.*});
         }
-        try argv.append(dir.*);
+        try argv.append(allocator, dir.*);
     }
     var child = std.process.Child.init(argv.items, allocator);
     child.stdout_behavior = .Pipe;
@@ -86,45 +86,44 @@ pub fn spawnWatcher(task: tasks.Task, skip_gitignore: bool) !void {
     proc = &child;
     try child.spawn();
 
-    var reader = child.stdout.?.reader();
-    var buf: [1024]u8 = undefined;
+    var reader = child.stdout.?;
+    // var buf: [1024]u8 = undefined;
 
     while (true) {
         if (utils.shouldExit()) {
             break;
         }
-        const line = reader.readUntilDelimiterOrEof(&buf, '\n') catch {
-            break;
-        };
-        if (line == null) break;
+        const lines = try reader.readToEndAlloc(allocator, std.math.maxInt(usize));
+        var lines_iter = std.mem.splitScalar(u8, lines, '\n');
+        while (lines_iter.next()) |line| {
+            if (std.mem.indexOf(u8, line, " ")) |idx| {
+                const file_path = line[0..idx];
+                const events = line[idx + 1 ..];
+                var event_set = std.StringHashMap(void).init(allocator);
+                defer event_set.deinit();
 
-        if (std.mem.indexOf(u8, line.?, " ")) |idx| {
-            const file_path = line.?[0..idx];
-            const events = line.?[idx + 1 ..];
-            var event_set = std.StringHashMap(void).init(allocator);
-            defer event_set.deinit();
+                var event_iter = std.mem.splitScalar(u8, events, ' ');
+                while (event_iter.next()) |event| {
+                    try event_set.put(event, {});
+                }
 
-            var event_iter = std.mem.splitScalar(u8, events, ' ');
-            while (event_iter.next()) |event| {
-                try event_set.put(event, {});
-            }
+                if (config.verbose) {
+                    zlog.debug("line: {s}", .{line.?});
+                }
 
-            if (config.verbose) {
-                zlog.debug("line: {s}", .{line.?});
-            }
-
-            if (event_set.contains("Created") or event_set.contains("Updated") or event_set.contains("Removed")) {
-                if (std.mem.startsWith(u8, file_path, cwd_path) and file_path.len > cwd_path.len) {
-                    // +1 to skip the trailing slash
-                    const rel_path = file_path[cwd_path.len + 1 ..];
-                    for (task.watcher.?) |glob| {
-                        if (config.verbose) {
-                            zlog.debug("Matching {s} with {s}", .{ glob, rel_path });
-                        }
-                        if (matchGlob(glob, rel_path)) {
-                            zlog.debug("Matched glob {s} against {s}", .{ glob, rel_path });
-                            watcher_ready.store(true, .seq_cst);
-                            break;
+                if (event_set.contains("Created") or event_set.contains("Updated") or event_set.contains("Removed")) {
+                    if (std.mem.startsWith(u8, file_path, cwd_path) and file_path.len > cwd_path.len) {
+                        // +1 to skip the trailing slash
+                        const rel_path = file_path[cwd_path.len + 1 ..];
+                        for (task.watcher.?) |glob| {
+                            if (config.verbose) {
+                                zlog.debug("Matching {s} with {s}", .{ glob, rel_path });
+                            }
+                            if (matchGlob(glob, rel_path)) {
+                                zlog.debug("Matched glob {s} against {s}", .{ glob, rel_path });
+                                watcher_ready.store(true, .seq_cst);
+                                break;
+                            }
                         }
                     }
                 }
@@ -246,7 +245,7 @@ pub fn parseGitignore(
     allocator: std.mem.Allocator,
     path: []const u8,
 ) !std.ArrayList([]const u8) {
-    var patterns = std.ArrayList([]const u8).init(allocator);
+    var patterns = try std.ArrayList([]const u8).initCapacity(allocator, 64);
     var file = std.fs.cwd().openFile(path, .{}) catch |err| {
         switch (err) {
             error.FileNotFound => {
@@ -259,13 +258,12 @@ pub fn parseGitignore(
     };
     defer file.close();
 
-    var reader = file.reader();
-    while (true) {
-        const line = try reader.readUntilDelimiterOrEofAlloc(allocator, '\n', 1024);
-        if (line == null) break;
-        const trimmed = std.mem.trim(u8, line.?, " \r\n");
+    const lines = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
+    var line_iter = std.mem.splitScalar(u8, lines, '\n');
+    while (line_iter.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \r\n");
         if (trimmed.len == 0 or trimmed[0] == '#') continue;
-        try patterns.append(trimmed);
+        try patterns.append(allocator, trimmed);
     }
     return patterns;
 }

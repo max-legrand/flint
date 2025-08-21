@@ -29,15 +29,16 @@ pub fn main() !void {
     var args_iter = std.process.args();
     defer args_iter.deinit();
 
-    var args = std.ArrayList([]const u8).init(allocator);
-    defer args.deinit();
+    const EXPECTED_ARGS = 2;
+    var args = try std.ArrayList([]const u8).initCapacity(allocator, EXPECTED_ARGS);
+    defer args.deinit(allocator);
 
     while (args_iter.next()) |arg| {
         if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--verbose")) {
             verbose = true;
             continue;
         }
-        try args.append(arg);
+        try args.append(allocator, arg);
     }
 
     const log_level: zlog.Logger.Level = if (verbose) .DEBUG else .INFO;
@@ -51,14 +52,14 @@ pub fn main() !void {
         std.process.exit(1);
     }
 
-    var clean_args = std.ArrayList([]const u8).init(allocator);
-    defer clean_args.deinit();
+    var clean_args = try std.ArrayList([]const u8).initCapacity(allocator, args.items.len);
+    defer clean_args.deinit(allocator);
 
     for (args.items[1..]) |arg| {
         if (std.mem.startsWith(u8, arg, "-")) {
             continue;
         } else {
-            try clean_args.append(arg);
+            try clean_args.append(allocator, arg);
         }
     }
 
@@ -189,12 +190,12 @@ fn runTaskAsync(allocator: std.mem.Allocator, flint: tasks.Flint, task: *tasks.T
         }
     }
 
-    var args = std.ArrayList([]const u8).init(allocator);
-    defer args.deinit();
+    var args = try std.ArrayList([]const u8).initCapacity(allocator, 64);
+    defer args.deinit(allocator);
 
     var iter = std.mem.tokenizeScalar(u8, task.cmd, ' ');
     while (iter.next()) |arg| {
-        try args.append(arg);
+        try args.append(allocator, arg);
     }
 
     zlog.info("Running command: {s}", .{task.cmd});
@@ -211,12 +212,12 @@ fn runTaskAndDeps(allocator: std.mem.Allocator, flint: tasks.Flint, task: *tasks
         }
     }
 
-    var args = std.ArrayList([]const u8).init(allocator);
-    defer args.deinit();
+    var args = try std.ArrayList([]const u8).initCapacity(allocator, 10);
+    defer args.deinit(allocator);
 
     var iter = std.mem.tokenizeScalar(u8, task.cmd, ' ');
     while (iter.next()) |arg| {
-        try args.append(arg);
+        try args.append(allocator, arg);
     }
 
     zlog.info("Running command: {s}", .{task.cmd});

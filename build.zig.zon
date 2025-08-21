@@ -28,7 +28,7 @@
 
     // Tracks the earliest Zig version that the package considers to be a
     // supported use case.
-    .minimum_zig_version = "0.15.0-dev.175+896ffe665",
+    .minimum_zig_version = "0.15.1",
 
     // This field is optional.
     // Each dependency must either provide a `url` and `hash`, or a `path`.
@@ -37,12 +37,12 @@
     // internet connectivity.
     .dependencies = .{
         .zlog = .{
-            .url = "git+https://github.com/max-legrand/zlog?ref=main#5bf1b4e877ae52cbbec127e30a4885bc95e87dd8",
-            .hash = "zlog-0.0.0-_MGzdbBDAABfTEnaVhw1nSH-EN9J4x_Svt9M07fkn6Vd",
+            .url = "../zlog",
+            .hash = "zlog-0.0.0-_MGzdQ5KAACOiyZ6PDfF9vzef43EVkL5VUfSxe9FfjQd",
         },
         .yazap = .{
-            .url = "git+https://github.com/prajwalch/yazap#71490491b8f1b0741218160b88cf0a87d2a941ce",
-            .hash = "yazap-0.6.3-Z1t-EiLlAQCR5mUSOlF1PovnwyPcIUGeV02lAIVMUEOc",
+            .url = "git+https://github.com/max-legrand/yazap?ref=zig-0.15.1#f17268eb1e90c4273219ecf09c10cf396e7b7eb5",
+            .hash = "yazap-0.6.3-Z1t-Eq3mAQAW1dr8DExjd4EBrGX-R_FcPrStsirbG3El",
         },
     },
     .paths = .{
