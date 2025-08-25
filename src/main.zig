@@ -106,7 +106,7 @@ pub fn main() !void {
         .watch => {
             // Create watcher thread.
             const watcher_thread = try std.Thread.spawn(.{ .allocator = allocator }, watcher.spawnWatcher, .{ task.?, false });
-            const debounce_ns = 100_000; // 200ms
+            const debounce_ns = 200_000; // 200ms
             var last_run_time: i128 = 0;
 
             var main_task: ?std.process.Child = null;
