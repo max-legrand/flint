@@ -16,10 +16,15 @@ const CommandType = enum { run, watch };
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    const gpa_allocator = gpa.allocator();
+    var backing_allocator: std.mem.Allocator = undefined;
+    if (builtin.mode == .Debug) {
+        backing_allocator = gpa.allocator();
+    } else {
+        backing_allocator = std.heap.smp_allocator;
+    }
     defer _ = gpa.deinit();
 
-    var arena = std.heap.ArenaAllocator.init(gpa_allocator);
+    var arena = std.heap.ArenaAllocator.init(backing_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
