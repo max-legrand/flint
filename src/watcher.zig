@@ -68,7 +68,13 @@ pub fn spawnWatcher(task: tasks.Task, skip_gitignore: bool) !void {
         if (utils.shouldExit()) {
             break;
         }
-        const lines = try reader.interface.allocRemaining(allocator, .unlimited);
+        const lines = try allocator.alloc(u8, 1024);
+        _ = reader.interface.readSliceAll(lines) catch |err| {
+            switch (err) {
+                error.EndOfStream => break,
+                else => return err,
+            }
+        };
         var lines_iter = std.mem.splitScalar(u8, lines, '\n');
         while (lines_iter.next()) |line| {
             if (std.mem.indexOf(u8, line, " ")) |idx| {
