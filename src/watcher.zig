@@ -14,7 +14,7 @@ pub fn spawnWatcher(task: tasks.Task, skip_gitignore: bool) !void {
     if (task.watcher == null) return error.NoWatcherPresent;
     const watcher = task.watcher.?;
 
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
     const gpa_allocator = gpa.allocator();
     defer _ = gpa.deinit();
 
@@ -68,13 +68,7 @@ pub fn spawnWatcher(task: tasks.Task, skip_gitignore: bool) !void {
         if (utils.shouldExit()) {
             break;
         }
-        const lines = try allocator.alloc(u8, 1024);
-        _ = reader.read(lines) catch |err| {
-            switch (err) {
-                error.EndOfStream => break,
-                else => return err,
-            }
-        };
+        const lines = try reader.interface.allocRemaining(allocator, .unlimited);
         var lines_iter = std.mem.splitScalar(u8, lines, '\n');
         while (lines_iter.next()) |line| {
             if (std.mem.indexOf(u8, line, " ")) |idx| {

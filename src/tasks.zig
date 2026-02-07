@@ -39,6 +39,7 @@ pub const Task = struct {
     deps: ?[]string = null,
     keep_alive: bool = false,
     cwd: ?[]const u8 = null,
+    env: ?[]string = null,
 
     pub fn deinit(self: *Task, allocator: std.mem.Allocator) void {
         allocator.free(self.name);
@@ -46,10 +47,17 @@ pub const Task = struct {
         if (self.cwd) |c| {
             allocator.free(c);
         }
+        if (self.env) |e| {
+            for (e) |s| {
+                allocator.free(s);
+            }
+            allocator.free(e);
+        }
         if (self.watcher) |w| {
             for (w) |s| {
                 allocator.free(s);
             }
+            allocator.free(w);
         }
         if (self.deps) |d| {
             for (d) |s| {
@@ -104,6 +112,13 @@ pub fn parseTasks(allocator: std.mem.Allocator) !Flint {
             }
         }
 
+        const env_vars = if (task.env) |e| try allocator.alloc(string, e.len) else null;
+        if (task.env) |e| {
+            for (e, 0..) |s, j| {
+                env_vars.?[j] = try allocator.dupe(u8, s);
+            }
+        }
+
         // If the cwd is present, first convert it to an absolute path.
         var cmd_cwd: ?[]const u8 = null;
         if (task.cwd) |dir| {
@@ -121,6 +136,7 @@ pub fn parseTasks(allocator: std.mem.Allocator) !Flint {
             .deps = deps,
             .keep_alive = task.keep_alive,
             .cwd = cmd_cwd,
+            .env = env_vars,
         };
         flint.tasks[i] = new_task;
         try flint.tasks_map.put(try allocator.dupeZ(u8, task.name), flint.tasks[i]);
