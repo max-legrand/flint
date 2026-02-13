@@ -6,7 +6,9 @@ const utils = @import("utils.zig");
 
 const string = []const u8;
 
-pub var proc: ?*std.process.Child = null;
+/// Store the fswatch pid directly so the signal handler can send SIGTERM
+/// without calling into non-signal-safe Zig runtime code.
+pub var proc_pid: std.atomic.Value(std.posix.pid_t) = std.atomic.Value(std.posix.pid_t).init(0);
 var gitignore_paths: std.ArrayList(string) = undefined;
 pub var watcher_ready = std.atomic.Value(bool).init(false);
 
@@ -46,95 +48,53 @@ pub fn spawnWatcher(task: tasks.Task, skip_gitignore: bool) !void {
         "-e", ".*", // exclude everything by default
     });
 
-    // Add regex filters for each glob
-    for (watcher) |glob| {
-        zlog.info("Watching {s} with regex {s}", .{ ".", glob });
+    // Add regex include filters
+    for (watcher) |pattern| {
+        zlog.info("Watching {s} with regex {s}", .{ ".", pattern });
         try argv.append(allocator, "-i");
-        try argv.append(allocator, glob);
-        try argv.append(allocator, ".");
+        try argv.append(allocator, pattern);
     }
+
+    // Add the directory to watch (after all flags)
+    try argv.append(allocator, ".");
 
     var child = std.process.Child.init(argv.items, allocator);
     child.stdout_behavior = .Pipe;
     child.stderr_behavior = .Pipe;
-    proc = &child;
     try child.spawn();
+    proc_pid.store(child.id, .seq_cst);
 
     var stdout = child.stdout.?;
-    var buf: [1024]u8 = undefined;
+    var buf: [4096]u8 = undefined;
     var reader = stdout.readerStreaming(&buf);
 
-    while (true) {
-        if (utils.shouldExit()) {
-            break;
+    while (!utils.shouldExit()) {
+        // Read one line at a time. takeDelimiter returns null on EOF.
+        const line = reader.interface.takeDelimiter('\n') catch |err| switch (err) {
+            error.ReadFailed => break,
+            error.StreamTooLong => continue,
+        } orelse break; // null = EOF (fswatch exited)
+
+        if (config.verbose) {
+            zlog.debug("line: {s}", .{line});
         }
-        const lines = try allocator.alloc(u8, 1024);
-        _ = reader.interface.readSliceAll(lines) catch |err| {
-            switch (err) {
-                error.EndOfStream => break,
-                else => return err,
-            }
-        };
-        var lines_iter = std.mem.splitScalar(u8, lines, '\n');
-        while (lines_iter.next()) |line| {
-            if (std.mem.indexOf(u8, line, " ")) |idx| {
-                const events = line[idx + 1 ..];
-                var event_set = std.StringHashMap(void).init(allocator);
-                defer event_set.deinit();
 
-                var event_iter = std.mem.splitScalar(u8, events, ' ');
-                while (event_iter.next()) |event| {
-                    try event_set.put(event, {});
-                }
+        if (std.mem.indexOf(u8, line, " ")) |idx| {
+            const events = line[idx + 1 ..];
 
-                if (config.verbose) {
-                    zlog.debug("line: {s}", .{line});
-                }
-
-                if (event_set.contains("Created") or event_set.contains("Updated") or event_set.contains("Removed")) {
-                    // No need to re-filter: fswatch already applied regex
-                    watcher_ready.store(true, .seq_cst);
-                }
+            if (std.mem.indexOf(u8, events, "Created") != null or
+                std.mem.indexOf(u8, events, "Updated") != null or
+                std.mem.indexOf(u8, events, "Removed") != null)
+            {
+                watcher_ready.store(true, .seq_cst);
             }
         }
     }
-}
 
-// Extract the base directory from a glob pattern
-fn globBaseDir(glob: []const u8) []const u8 {
-    if (std.mem.indexOfAny(u8, glob, "*?")) |idx| {
-        return std.fs.path.dirname(glob[0..idx]) orelse ".";
-    }
-    return std.fs.path.dirname(glob) orelse ".";
-}
-
-// Convert a glob pattern into a regex string for fswatch
-fn globToRegex(glob: []const u8, allocator: std.mem.Allocator) ![]const u8 {
-    var buf = std.ArrayList(u8).empty;
-
-    try buf.append(allocator, '^');
-    var i: usize = 0;
-    while (i < glob.len) : (i += 1) {
-        switch (glob[i]) {
-            '*' => {
-                if (i + 1 < glob.len and glob[i + 1] == '*') {
-                    // ** → .*
-                    try buf.appendSlice(allocator, ".*");
-                    i += 1; // skip second *
-                } else {
-                    // * → [^/]* (match within a single directory)
-                    try buf.appendSlice(allocator, "[^/]*");
-                }
-            },
-            '?' => try buf.append(allocator, '.'),
-            '.' => try buf.appendSlice(allocator, "\\."),
-            '/' => try buf.append(allocator, '/'),
-            else => try buf.append(allocator, glob[i]),
-        }
-    }
-    try buf.append(allocator, '$');
-
-    return buf.toOwnedSlice(allocator);
+    // Clean up: ensure fswatch is terminated
+    proc_pid.store(0, .seq_cst);
+    _ = child.kill() catch {};
+    _ = child.wait() catch {};
 }
 
 pub fn parseGitignore(

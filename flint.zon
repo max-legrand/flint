@@ -3,7 +3,7 @@
         .{
             .name = "test",
             .cmd = "cat flint.zon",
-            .watcher = .{ "**/*.zig", "**/*.txt" },
+            .watcher = .{ ".*\\.zig", ".*\\.txt" },
             .deps = .{"dep"},
         },
         .{
@@ -14,7 +14,7 @@
             .name = "long-run",
             .cmd = "python3 -m http.server 8000",
             .deps = .{"dep"},
-            .watcher = .{"**/*.zig"},
+            .watcher = .{".*\\.zig"},
             .keep_alive = true,
         },
     },

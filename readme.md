@@ -18,7 +18,7 @@ Example `flint.zon` file:
             .name = "build",
             .cmd = "zig build --release=safe --summary all",
             .watcher = .{
-                "src/*",
+                "src/.*\\.zig",
             }
             .deps = .{
                 "clean",
